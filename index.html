@@ -30,11 +30,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
     Gamepad2, Search, Bell, X, ChevronLeft, ChevronRight,
-    Star, Flame, Tv, Crosshair, Tag,
+    Star, Flame, Tv, Crosshair, Tag, MessageSquare,
     Clock, Globe, AlertTriangle, CheckCircle, Plus,
     Bookmark, MonitorPlay, ShoppingCart, User, Activity, Zap,
     Play, Home, CalendarDays, Sparkles, TrendingUp,
-    Info, Users, Calendar, Filter, Smartphone, Monitor, Disc, Video
+    Info, Users, Calendar, Filter, Smartphone, Monitor, Disc, Video, Link as LinkIcon, Edit2, Settings,
+    Shield, Palette, Cpu, Lock, LogOut, Eye, Hash, Server, Sliders
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
@@ -58,6 +59,85 @@ const APP_ID = (typeof __app_id !== 'undefined' ? __app_id : "levelup-gaming-v1"
 const RAWG_API_KEY = 'bc01fdd49e704c9387f1eeb375d749cd';
 const RAWG_BASE = 'https://api.rawg.io/api';
 const CHEAPSHARK_BASE = 'https://www.cheapshark.com/api/1.0';
+const YOUTUBE_API_KEY = ''; // <-- Insère ta clé API YouTube ici pour avoir 100% des trailers !
+
+// VARIABLES GLOBALES POUR CACHE FIREBASE & DISJONCTEUR
+let globalUserId = null;
+let isRawgDead = false;
+
+// --- SYSTÈME DE CACHE INTELLIGENT (LOCAL + FIREBASE CLOUD) ---
+const fetchCached = async (url, cacheKey, ttl = 86400000) => {
+    const firebaseDocId = encodeURIComponent(cacheKey); // Sécurise la clé pour empêcher Firebase de lire les "/" comme des dossiers
+
+    // 1. Vérification en LocalStorage (Ultra rapide, 0 quota)
+    try {
+        const cached = localStorage.getItem(cacheKey);
+        if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Date.now() - parsed.time < ttl) return parsed.data;
+        }
+    } catch(e) {}
+
+    // 2. Vérification dans Firebase (Sauvegarde entre appareils, 0 quota RAWG)
+    if (globalUserId && db) {
+        try {
+            // Utilisation d'un cache spécifique à l'utilisateur
+            const docRef = doc(db, "artifacts", APP_ID, "users", globalUserId, "api_cache", firebaseDocId);
+            const snap = await getDoc(docRef);
+            if (snap.exists()) {
+                const parsed = snap.data();
+                if (Date.now() - parsed.time < ttl) {
+                    // On restaure en local pour accélérer la prochaine fois
+                    try { localStorage.setItem(cacheKey, JSON.stringify(parsed)); } catch(e){}
+                    return parsed.data;
+                }
+            }
+        } catch(e) { console.warn("Erreur lecture Firebase Cache", e); }
+    }
+
+    // 3. Disjoncteur Anti-Spam (Évite le flood 401)
+    if (url.includes('api.rawg.io') && isRawgDead) {
+        return null;
+    }
+
+    // 4. Requête API (Ultime recours)
+    try {
+        const res = await fetch(url);
+        
+        if (!res.ok) {
+            if (res.status === 401 || res.status === 403 || res.status === 429) {
+                if (url.includes('api.rawg.io')) isRawgDead = true; // On coupe l'API RAWG
+                window.dispatchEvent(new CustomEvent('api-error', { detail: res.status }));
+                return null; // <-- CORRECTION: On retourne null sans déclencher le console.error en bas !
+            }
+            throw new Error(`Erreur réseau: ${res.status}`);
+        }
+        
+        const text = await res.text();
+        if (!text) return null;
+        
+        const data = JSON.parse(text);
+        const cachePayload = { time: Date.now(), data };
+        
+        // Sauvegarde Local
+        try { localStorage.setItem(cacheKey, JSON.stringify(cachePayload)); } 
+        catch(e) { localStorage.clear(); localStorage.setItem(cacheKey, JSON.stringify(cachePayload)); }
+
+        // Sauvegarde Firebase silencieuse (ne bloque pas le retour)
+        if (globalUserId && db) {
+            // Nettoyage des undefined pour Firebase
+            const cleanPayload = JSON.parse(JSON.stringify(cachePayload));
+            setDoc(doc(db, "artifacts", APP_ID, "users", globalUserId, "api_cache", firebaseDocId), cleanPayload)
+                .catch(e => console.warn("Erreur écriture Firebase Cache", e));
+        }
+
+        return data;
+    } catch (e) {
+        // On log l'erreur proprement sans polluer
+        console.error(`[API Bloquée] ${cacheKey} : ${e.message}`);
+        return null; 
+    }
+};
 
 // --- UTILITAIRES DE DATES ---
 const getDates = () => {
@@ -75,6 +155,11 @@ const getDates = () => {
 };
 const dates = getDates();
 
+const formatDateExact = (dateStr) => {
+    if (!dateStr) return 'Date Inconnue';
+    return new Date(dateStr).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+};
+
 // --- LOGO LEVELUP ---
 const LevelUpLogo = ({ className = "w-8 h-8" }) => (
     <svg viewBox="0 0 24 24" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -90,27 +175,15 @@ const LevelUpLogo = ({ className = "w-8 h-8" }) => (
 
 const globalStyles = `
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-    
     body { font-family: 'Inter', sans-serif; background-color: #060608; color: #fff; scrollbar-width: none; padding-bottom: env(safe-area-inset-bottom); }
-    
     ::-webkit-scrollbar { display: none; }
-    
-    .markdown p { margin-bottom: 1em; color: rgba(255,255,255,0.6); line-height: 1.8; font-size: 0.95rem; }
-    .markdown strong { color: rgba(255,255,255,0.9); font-weight: 700; }
+    .markdown p { margin-bottom: 1em; color: rgba(255,255,255,0.7); line-height: 1.6; font-size: 0.9rem; }
+    @media (min-width: 768px) { .markdown p { font-size: 1rem; line-height: 1.8; } }
+    .markdown strong { color: rgba(255,255,255,0.95); font-weight: 700; }
     .markdown h3 { font-size: 1.2rem; font-weight: 800; margin-top: 1.5em; margin-bottom: 0.5em; color: white; }
-    .markdown br { content: ""; margin: 1em; display: block; font-size: 24%; }
-
-    .row-container {
-        -webkit-overflow-scrolling: touch;
-        scroll-behavior: smooth;
-    }
-    .row-container.is-dragging {
-        scroll-behavior: auto;
-        cursor: grabbing !important;
-    }
-    .row-container.is-dragging > * {
-        pointer-events: none;
-    }
+    .row-container { -webkit-overflow-scrolling: touch; scroll-behavior: smooth; }
+    .row-container.is-dragging { scroll-behavior: auto; cursor: grabbing !important; }
+    .row-container.is-dragging > * { pointer-events: none; }
 `;
 
 function useDragToScroll() {
@@ -118,46 +191,22 @@ function useDragToScroll() {
     useEffect(() => {
         const slider = ref.current;
         if (!slider) return;
-        let isDown = false;
-        let startX;
-        let scrollLeft;
-
-        const onMouseDown = (e) => {
-            isDown = true;
-            slider.classList.add('is-dragging');
-            startX = e.pageX - slider.offsetLeft;
-            scrollLeft = slider.scrollLeft;
-        };
+        let isDown = false, startX, scrollLeft;
+        const onMouseDown = (e) => { isDown = true; slider.classList.add('is-dragging'); startX = e.pageX - slider.offsetLeft; scrollLeft = slider.scrollLeft; };
         const onMouseLeave = () => { isDown = false; slider.classList.remove('is-dragging'); };
         const onMouseUp = () => { isDown = false; slider.classList.remove('is-dragging'); };
-        const onMouseMove = (e) => {
-            if (!isDown) return;
-            e.preventDefault();
-            const x = e.pageX - slider.offsetLeft;
-            const walk = (x - startX) * 2; 
-            slider.scrollLeft = scrollLeft - walk;
-        };
-
-        slider.addEventListener('mousedown', onMouseDown);
-        slider.addEventListener('mouseleave', onMouseLeave);
-        slider.addEventListener('mouseup', onMouseUp);
-        slider.addEventListener('mousemove', onMouseMove);
-
-        return () => {
-            slider.removeEventListener('mousedown', onMouseDown);
-            slider.removeEventListener('mouseleave', onMouseLeave);
-            slider.removeEventListener('mouseup', onMouseUp);
-            slider.removeEventListener('mousemove', onMouseMove);
-        };
+        const onMouseMove = (e) => { if (!isDown) return; e.preventDefault(); const x = e.pageX - slider.offsetLeft; const walk = (x - startX) * 2; slider.scrollLeft = scrollLeft - walk; };
+        slider.addEventListener('mousedown', onMouseDown); slider.addEventListener('mouseleave', onMouseLeave); slider.addEventListener('mouseup', onMouseUp); slider.addEventListener('mousemove', onMouseMove);
+        return () => { slider.removeEventListener('mousedown', onMouseDown); slider.removeEventListener('mouseleave', onMouseLeave); slider.removeEventListener('mouseup', onMouseUp); slider.removeEventListener('mousemove', onMouseMove); };
     }, []);
     return ref;
 }
 
 const PLATFORMS = [
-    { id: 'all', label: 'Toutes les Plateformes', query: '', icon: <Filter className="w-3.5 h-3.5" /> },
+    { id: 'all', label: 'Toutes', query: '', icon: <Filter className="w-3.5 h-3.5" /> },
     { id: 'pc', label: 'PC', query: '&parent_platforms=1', icon: <Monitor className="w-3.5 h-3.5" /> },
-    { id: 'console', label: 'Consoles (PS, Xbox, Switch)', query: '&parent_platforms=2,3,7', icon: <Disc className="w-3.5 h-3.5" /> },
-    { id: 'mobile', label: 'Mobiles / Tablettes', query: '&parent_platforms=4,8', icon: <Smartphone className="w-3.5 h-3.5" /> },
+    { id: 'console', label: 'Consoles', query: '&parent_platforms=2,3,7', icon: <Disc className="w-3.5 h-3.5" /> },
+    { id: 'mobile', label: 'Mobiles', query: '&parent_platforms=4,8', icon: <Smartphone className="w-3.5 h-3.5" /> },
 ];
 
 function App() {
@@ -167,45 +216,80 @@ function App() {
     
     const [currentCategory, setCurrentCategory] = useState('home'); 
     const [showSettings, setShowSettings] = useState(false);
+    const [showNotifications, setShowNotifications] = useState(false);
+    const [unreadNotifs, setUnreadNotifs] = useState(3);
 
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState([]);
     const [isSearching, setIsSearching] = useState(false);
     
     const [platformFilter, setPlatformFilter] = useState(''); 
-    
     const [heroGame, setHeroGame] = useState(null);
-    const [selectedGameData, setSelectedGameData] = useState(null); // Contient { game, stream }
+    const [selectedGameData, setSelectedGameData] = useState(null); 
     
     const [watchlist, setWatchlist] = useState([]);
     const [watchlistGames, setWatchlistGames] = useState([]);
+    const [stores, setStores] = useState({});
+    
+    // Nouveaux états pour le profil enrichi et Dashboard
+    const [settingsTab, setSettingsTab] = useState('account');
+    const [isEditingName, setIsEditingName] = useState(false);
+    const [editNameValue, setEditNameValue] = useState("");
+    
+    // Préférences avancées simulées pour le rendu "Dashboard Gigantesque"
+    const [preferences, setPreferences] = useState({ notifs: true, dataSaver: false });
+    const [advancedPrefs, setAdvancedPrefs] = useState({
+        publicProfile: true, showActivity: true, acceptMessages: false,
+        cinematicMode: true, animations: true, autoPlay: true, hqTrailers: false
+    });
 
+    const [twitchConnected, setTwitchConnected] = useState(localStorage.getItem('twitch_auth') === 'true');
+
+    const togglePref = (key) => setAdvancedPrefs(p => ({...p, [key]: !p[key]}));
+
+    // Écouteur global pour les erreurs d'API
     useEffect(() => {
-        const initAuth = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    try { await signInWithCustomToken(auth, __initial_auth_token); } catch (e) { await signInAnonymously(auth); }
-                } else { await signInAnonymously(auth); }
-            } catch(e) {}
-        };
-        initAuth();
-        
-        const unsubscribe = onAuthStateChanged(auth, (u) => {
-            if (u) {
-                setUser({ uid: u.uid, name: `Joueur_${u.uid.substring(0,5)}` });
-                fetchWatchlist(u.uid);
+        const unsubscribe = onAuthStateChanged(auth, async (u) => {
+            if (u) { 
+                globalUserId = u.uid; // MAJ de la variable globale pour le cache Firebase
+                fetchWatchlist(u.uid); 
+                
+                // Récupération du profil personnalisé depuis le Cloud
+                try {
+                    const profileSnap = await getDoc(doc(db, "artifacts", APP_ID, "users", u.uid, "data", "profile"));
+                    if (profileSnap.exists() && profileSnap.data().name) {
+                        setUser({ uid: u.uid, name: profileSnap.data().name });
+                    } else {
+                        setUser({ uid: u.uid, name: `Joueur_${u.uid.substring(0,5)}` });
+                    }
+                } catch(e) {
+                    setUser({ uid: u.uid, name: `Joueur_${u.uid.substring(0,5)}` });
+                }
             }
         });
         return () => unsubscribe();
     }, []);
 
+    const saveProfile = async () => {
+        if(editNameValue.trim()) {
+            setUser(prev => ({...prev, name: editNameValue}));
+            if (globalUserId && db) {
+                try {
+                    await setDoc(doc(db, "artifacts", APP_ID, "users", globalUserId, "data", "profile"), { name: editNameValue }, { merge: true });
+                    showToast("Profil mis à jour !", "success");
+                } catch(e) { showToast("Erreur de sauvegarde", "error"); }
+            }
+        }
+        setIsEditingName(false);
+    };
+
     const fetchWatchlist = async (uid) => {
+        if (!uid) return;
         try {
             const snap = await getDoc(doc(db, "artifacts", APP_ID, "users", uid, "data", "watchlist"));
             if (snap.exists()) {
                 const ids = snap.data().games || [];
-                setWatchlist(ids);
-                fetchWatchlistGames(ids);
+                setWatchlist(ids); fetchWatchlistGames(ids);
             }
         } catch(e) {}
     };
@@ -213,9 +297,14 @@ function App() {
     const fetchWatchlistGames = async (ids) => {
         if (!ids || ids.length === 0) return setWatchlistGames([]);
         try {
-            const promises = ids.map(id => fetch(`${RAWG_BASE}/games/${id}?key=${RAWG_API_KEY}`).then(r => r.json()));
-            const games = await Promise.all(promises);
-            setWatchlistGames(games.filter(g => !g.detail)); 
+            // Séquentiel pour le radar aussi au cas où
+            const games = [];
+            for (const id of ids) {
+                if (isRawgDead) break;
+                const g = await fetchCached(`${RAWG_BASE}/games/${id}?key=${RAWG_API_KEY}`, `game_detail_${id}`);
+                if (g && !g.detail) games.push(g);
+            }
+            setWatchlistGames(games); 
         } catch(e) {}
     };
 
@@ -228,32 +317,22 @@ function App() {
     const showToast = useCallback((msg, type = 'info') => {
         const id = Date.now();
         setToasts(prev => [...prev, { id, msg, type }]);
-        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
     }, []);
 
     useEffect(() => {
         if (!searchQuery.trim()) return setSearchResults([]);
         const delayDebounceFn = setTimeout(async () => {
             setIsSearching(true);
-            try {
-                const res = await fetch(`${RAWG_BASE}/games?key=${RAWG_API_KEY}&search=${encodeURIComponent(searchQuery)}&page_size=16`);
-                const data = await res.json();
-                setSearchResults(data.results || []);
-            } catch (e) { }
+            const data = await fetchCached(`${RAWG_BASE}/games?key=${RAWG_API_KEY}&search=${encodeURIComponent(searchQuery)}&page_size=16`, `search_${searchQuery}`);
+            if(data) setSearchResults(data.results || []);
             setIsSearching(false);
         }, 500);
         return () => clearTimeout(delayDebounceFn);
     }, [searchQuery]);
 
-    // Modifié pour accepter un stream initial
-    const openGameModal = (game, stream = null) => {
-        setSelectedGameData({ game, stream });
-        window.history.pushState({ modal: true }, "");
-    };
-
-    const closeGameModal = () => {
-        setSelectedGameData(null);
-    };
+    const openGameModal = (game, stream = null) => { setSelectedGameData({ game, stream }); window.history.pushState({ modal: true }, ""); };
+    const closeGameModal = () => setSelectedGameData(null);
 
     useEffect(() => {
         const handlePopState = () => setSelectedGameData(null);
@@ -261,10 +340,12 @@ function App() {
         return () => window.removeEventListener('popstate', handlePopState);
     }, []);
 
-    const navigateTo = (cat) => {
-        setCurrentCategory(cat);
-        setSearchQuery('');
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+    const navigateTo = (cat) => { setCurrentCategory(cat); setSearchQuery(''); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+
+    const handleTwitchAuth = () => {
+        setTwitchConnected(true);
+        localStorage.setItem('twitch_auth', 'true');
+        showToast("Compte Twitch lié avec succès !", "success");
     };
 
     return (
@@ -279,36 +360,61 @@ function App() {
             ))}
 
             {/* HEADER */}
-            <header className={`fixed top-0 w-full z-50 transition-all duration-400 ${isScrolled ? 'bg-[#060608]/90 backdrop-blur-xl border-b border-white/10 py-3 shadow-2xl' : 'bg-transparent py-4 md:py-6'}`}>
-                <div className="px-4 md:px-12 mx-auto flex items-center justify-between gap-4 max-w-[1600px]">
+            <header className={`fixed top-0 w-full z-50 transition-all duration-400 ${isScrolled ? 'bg-[#060608]/90 backdrop-blur-xl border-b border-white/10 py-2 md:py-3 shadow-2xl' : 'bg-transparent py-4 md:py-6'}`}>
+                <div className="px-4 md:px-8 lg:px-12 mx-auto flex items-center justify-between gap-3 max-w-[1600px]">
                     
                     <div className="flex items-center gap-3 cursor-pointer shrink-0 hover:opacity-80 transition-opacity" onClick={() => navigateTo('home')}>
                         <LevelUpLogo className="w-8 h-8 md:w-10 md:h-10 drop-shadow-[0_0_15px_rgba(168,85,247,0.5)]" />
                     </div>
 
-                    <nav className="hidden md:flex items-center gap-8 text-sm font-bold uppercase tracking-[0.15em] text-white/50 absolute left-1/2 -translate-x-1/2">
+                    <nav className="hidden lg:flex items-center gap-8 text-sm font-bold uppercase tracking-[0.15em] text-white/50 absolute left-1/2 -translate-x-1/2">
                         <button onClick={() => navigateTo('home')} className={`hover:text-white transition-colors outline-none ${currentCategory==='home'?'text-white':''}`}>Accueil</button>
                         <button onClick={() => navigateTo('new')} className={`hover:text-white transition-colors outline-none ${currentCategory==='new'?'text-white':''}`}>Nouveautés</button>
+                        <button onClick={() => navigateTo('mobile')} className={`hover:text-white transition-colors outline-none flex items-center gap-2 ${currentCategory==='mobile'?'text-white':''}`}><Smartphone className="w-4 h-4"/> Mobile</button>
                         <button onClick={() => navigateTo('lives')} className={`hover:text-white transition-colors outline-none flex items-center gap-2 ${currentCategory==='lives'?'text-white':''}`}>
                             <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span></span>
-                            Sessions Live
+                            Twitch Live
                         </button>
-                        <button onClick={() => navigateTo('deals')} className={`hover:text-white transition-colors outline-none flex items-center gap-2 ${currentCategory==='deals'?'text-white':''}`}><Tag className="w-4 h-4"/> Deals</button>
-                        <button onClick={() => navigateTo('watchlist')} className={`hover:text-white transition-colors outline-none flex items-center gap-2 ${currentCategory==='watchlist'?'text-white':''}`}>
-                            Radar {watchlist.length > 0 && <span className="text-[#a855f7] ml-1">({watchlist.length})</span>}
-                        </button>
+                        <button onClick={() => navigateTo('deals')} className={`hover:text-white transition-colors outline-none flex items-center gap-2 ${currentCategory==='deals'?'text-white':''}`}><Tag className="w-4 h-4"/> Boutiques</button>
                     </nav>
 
-                    <div className="flex items-center gap-3 ml-auto shrink-0 w-full md:w-auto max-w-[200px] md:max-w-xs">
-                        <div className="relative group w-full">
-                            <Search className="absolute left-3 md:left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 group-focus-within:text-[#a855f7] transition-colors" />
-                            <input
-                                type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-                                placeholder="Recherche..."
-                                className="w-full bg-[#151520]/80 border border-white/10 rounded-full pl-10 pr-4 py-2.5 text-xs md:text-sm outline-none focus:border-[#a855f7]/50 focus:bg-[#151520] transition-all font-medium text-white placeholder-white/30 backdrop-blur-md shadow-inner"
-                            />
+                    <div className="flex items-center gap-2 md:gap-4 ml-auto shrink-0 justify-end">
+                        <div className="relative group w-[100px] sm:w-[150px] md:w-[200px] lg:w-[250px]">
+                            <Search className="absolute left-2.5 md:left-4 top-1/2 -translate-y-1/2 w-3.5 h-3.5 md:w-4 md:h-4 text-white/30 group-focus-within:text-[#a855f7] transition-colors" />
+                            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Rechercher..." className="w-full bg-[#151520]/80 border border-white/10 rounded-full pl-8 md:pl-10 pr-3 py-1.5 md:py-2.5 text-[10px] md:text-xs outline-none focus:border-[#a855f7]/50 focus:bg-[#151520] transition-all font-bold text-white placeholder-white/30 backdrop-blur-md uppercase tracking-widest" />
                         </div>
-                        <button onClick={() => setShowSettings(true)} className="w-9 h-9 md:w-10 md:h-10 shrink-0 rounded-full border border-[#a855f7]/40 flex items-center justify-center hover:border-[#a855f7] hover:scale-105 transition-all outline-none bg-[#151520] overflow-hidden group shadow-[0_0_15px_rgba(168,85,247,0.2)]">
+                        
+                        <div className="relative shrink-0">
+                            <button onClick={() => {setShowNotifications(!showNotifications); setUnreadNotifs(0);}} className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-all outline-none relative">
+                                <Bell className="w-4 h-4 md:w-5 md:h-5 text-white/70" />
+                                {unreadNotifs > 0 && <span className="absolute top-0 right-0 w-3 h-3 bg-[#a855f7] rounded-full border-2 border-[#060608]"></span>}
+                            </button>
+                            {/* PANNEAU NOTIFICATIONS */}
+                            {showNotifications && (
+                                <div className="absolute right-0 mt-2 w-72 md:w-80 bg-[#151520] border border-white/10 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] overflow-hidden z-[100] animate-in fade-in slide-in-from-top-2">
+                                    <div className="p-4 border-b border-white/5 flex justify-between items-center bg-[#1a1a24]">
+                                        <h3 className="font-black text-xs uppercase tracking-widest">Centre de messages</h3>
+                                        <button onClick={()=>setShowNotifications(false)}><X className="w-4 h-4 text-white/50 hover:text-white" /></button>
+                                    </div>
+                                    <div className="max-h-[300px] overflow-y-auto no-scrollbar">
+                                        <div className="p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer flex gap-3">
+                                            <div className="w-8 h-8 rounded-full bg-[#4ade80]/10 flex items-center justify-center shrink-0 text-[#4ade80]"><Tag className="w-4 h-4" /></div>
+                                            <div><p className="text-xs font-bold text-white/90">Promo Cyberpunk 2077 !</p><p className="text-[10px] text-white/50 mt-1">Le jeu est actuellement à -50% sur Steam.</p></div>
+                                        </div>
+                                        <div className="p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer flex gap-3">
+                                            <div className="w-8 h-8 rounded-full bg-red-500/10 flex items-center justify-center shrink-0 text-red-500"><Tv className="w-4 h-4" /></div>
+                                            <div><p className="text-xs font-bold text-white/90">Tournoi E-sport en cours</p><p className="text-[10px] text-white/50 mt-1">Regardez les finales de Valorant en direct.</p></div>
+                                        </div>
+                                        <div className="p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer flex gap-3">
+                                            <div className="w-8 h-8 rounded-full bg-[#a855f7]/10 flex items-center justify-center shrink-0 text-[#a855f7]"><Sparkles className="w-4 h-4" /></div>
+                                            <div><p className="text-xs font-bold text-white/90">Nouvelle Mise à jour</p><p className="text-[10px] text-white/50 mt-1">Découvrez la Saison 4 de votre jeu favori.</p></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <button onClick={() => setShowSettings(true)} className="w-8 h-8 md:w-10 md:h-10 shrink-0 rounded-full border border-[#a855f7]/40 flex items-center justify-center hover:border-[#a855f7] transition-all outline-none bg-[#151520] group shadow-[0_0_15px_rgba(168,85,247,0.2)]">
                             <User className="w-4 h-4 md:w-5 md:h-5 text-[#a855f7] group-hover:text-white transition-colors" />
                         </button>
                     </div>
@@ -316,21 +422,20 @@ function App() {
             </header>
 
             {/* BOTTOM NAV (MOBILE) */}
-            <nav className="md:hidden fixed bottom-0 w-full z-50 bg-[#060608]/95 backdrop-blur-xl border-t border-white/10 flex overflow-x-auto no-scrollbar items-center py-2 px-4 gap-4 shadow-2xl pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
+            <nav className="lg:hidden fixed bottom-0 w-full z-50 bg-[#060608]/95 backdrop-blur-xl border-t border-white/10 flex justify-around items-center py-2 px-2 shadow-2xl pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
                 <MobileNavBtn active={currentCategory==='home'} onClick={()=>navigateTo('home')} icon={<Home className="w-5 h-5"/>} label="Accueil" />
                 <MobileNavBtn active={currentCategory==='new'} onClick={()=>navigateTo('new')} icon={<Sparkles className="w-5 h-5"/>} label="Nouveau" />
-                <MobileNavBtn active={currentCategory==='lives'} onClick={()=>navigateTo('lives')} icon={<><Tv className="w-5 h-5"/><span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse border border-[#060608]"></span></>} label="Lives" />
-                <MobileNavBtn active={currentCategory==='calendar'} onClick={()=>navigateTo('calendar')} icon={<CalendarDays className="w-5 h-5"/>} label="À Venir" />
-                <MobileNavBtn active={currentCategory==='deals'} onClick={()=>navigateTo('deals')} icon={<Tag className="w-5 h-5"/>} label="Deals" />
+                <MobileNavBtn active={currentCategory==='mobile'} onClick={()=>navigateTo('mobile')} icon={<Smartphone className="w-5 h-5"/>} label="Mobile" />
+                <MobileNavBtn active={currentCategory==='lives'} onClick={()=>navigateTo('lives')} icon={<><Tv className="w-5 h-5"/><span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse border border-[#060608]"></span></>} label="Twitch" />
                 <MobileNavBtn active={currentCategory==='watchlist'} onClick={()=>navigateTo('watchlist')} icon={<Bookmark className="w-5 h-5"/>} label="Radar" />
             </nav>
 
             {/* ROUTING PRINCIPAL */}
             {searchQuery ? (
-                <div className="pt-28 md:pt-32 px-4 md:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
+                <div className="pt-28 md:pt-32 px-4 md:px-8 lg:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
                     <h2 className="text-white/90 text-lg md:text-2xl font-black mb-8 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-4">Résultats pour "{searchQuery}"</h2>
-                    {isSearching ? (
-                        <div className="flex items-center justify-center py-20 text-[#a855f7] text-sm uppercase tracking-widest font-bold"><Zap className="w-6 h-6 animate-pulse mr-3" /> Recherche...</div>
+                    {isSearching ? <LoadingText /> : searchResults.length === 0 ? (
+                        <div className="text-center py-20 text-white/50">Aucun résultat trouvé.</div>
                     ) : (
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6">
                             {searchResults.map(game => <GameCard key={game.id} game={game} onClick={() => openGameModal(game)} />)}
@@ -340,8 +445,8 @@ function App() {
             ) : currentCategory === 'lives' ? (
                 <LiveSessionsPage onPlay={(game, stream) => openGameModal(game, stream)} />
             ) : currentCategory === 'watchlist' ? (
-                <div className="pt-28 md:pt-32 px-4 md:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
-                    <h2 className="text-white/90 text-xl md:text-3xl font-black mb-10 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-5">Radar Personnel</h2>
+                <div className="pt-28 md:pt-32 px-4 md:px-8 lg:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
+                    <h2 className="text-white/90 text-xl md:text-3xl font-black mb-10 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-5">Mon Radar</h2>
                     {watchlistGames.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-32 text-white/20 bg-[#151520] rounded-3xl mx-auto max-w-lg border border-white/5 shadow-2xl"><Crosshair className="w-20 h-20 mb-6 opacity-30" /><p className="text-sm font-bold uppercase tracking-[0.2em]">Aucune cible verrouillée.</p></div>
                     ) : (
@@ -351,342 +456,515 @@ function App() {
                     )}
                 </div>
             ) : currentCategory === 'new' ? (
-                <div className="pt-28 md:pt-32 px-4 md:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
-                    <PageHeader title="Nouveautés" subtitle="Sorties des 30 derniers jours" icon={<Sparkles className="w-6 h-6 md:w-8 md:h-8 text-[#00ffcc]" />} color="from-[#00ffcc]/10 to-transparent" borderColor="border-[#00ffcc]/30" />
-                    <GameGrid endpoint={`/games?dates=${dates.lastMonth},${dates.today}&ordering=-added`} onGameClick={openGameModal} />
+                <div className="pt-28 md:pt-32 px-4 md:px-8 lg:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
+                    <PageHeader title="Nouveautés" subtitle="Sorties récentes" icon={<Sparkles className="w-6 h-6 md:w-8 md:h-8 text-[#00ffcc]" />} color="from-[#00ffcc]/10 to-transparent" borderColor="border-[#00ffcc]/30" />
+                    <InfiniteGameGrid endpoint={`/games?dates=${dates.lastMonth},${dates.today}&ordering=-added`} onGameClick={openGameModal} />
                 </div>
-            ) : currentCategory === 'calendar' ? (
-                <div className="pt-28 md:pt-32 px-4 md:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
-                    <PageHeader title="Calendrier" subtitle="Les hits de demain" icon={<CalendarDays className="w-6 h-6 md:w-8 md:h-8 text-[#a855f7]" />} color="from-[#a855f7]/10 to-transparent" borderColor="border-[#a855f7]/30" />
-                    <GameGrid endpoint={`/games?dates=${dates.today},${dates.nextYear}&ordering=released`} onGameClick={openGameModal} showReleaseDate={true} />
+            ) : currentCategory === 'mobile' ? (
+                <div className="pt-28 md:pt-32 px-4 md:px-8 lg:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
+                    <PageHeader title="Jeux Mobiles" subtitle="Défilement infini - App Store & Google Play" icon={<Smartphone className="w-6 h-6 md:w-8 md:h-8 text-[#3b82f6]" />} color="from-[#3b82f6]/10 to-transparent" borderColor="border-[#3b82f6]/30" />
+                    <InfiniteGameGrid endpoint={`/games?parent_platforms=4,8&ordering=-added`} onGameClick={openGameModal} />
                 </div>
             ) : currentCategory === 'deals' ? (
-                <div className="pt-28 md:pt-32 px-4 md:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
-                    <PageHeader title="Boutique" subtitle="Meilleures offres actuelles" icon={<Tag className="w-6 h-6 md:w-8 md:h-8 text-[#4ade80]" />} color="from-[#4ade80]/10 to-transparent" borderColor="border-[#4ade80]/30" />
-                    <DealsGrid onDealClick={(title) => { setSearchQuery(title); window.scrollTo({top: 0, behavior: 'smooth'}); }} />
-                </div>
-            ) : (
-                <>
-                    <HeroBanner onPlay={() => heroGame && openGameModal(heroGame)} setHero={setHeroGame} />
-                    
-                    <div className="px-4 md:px-12 relative z-20 max-w-[1600px] mx-auto -mt-6 md:-mt-8 mb-12 flex justify-center">
-                        <div className="flex flex-wrap justify-center gap-2 md:gap-3 bg-[#151520]/80 backdrop-blur-xl p-2 md:p-3 rounded-3xl md:rounded-full border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] w-fit">
-                            {PLATFORMS.map(p => (
-                                <button key={p.id} onClick={() => setPlatformFilter(p.query)}
-                                className={`flex items-center gap-2 px-4 py-2 md:px-5 md:py-2.5 rounded-full font-black uppercase tracking-widest text-[9px] md:text-xs transition-all whitespace-nowrap outline-none ${platformFilter === p.query ? 'bg-[#a855f7] text-white shadow-[0_0_20px_rgba(168,85,247,0.4)] scale-105' : 'text-white/50 hover:bg-white/10 hover:text-white'}`}>
-                                    {p.icon} <span className="hidden sm:inline">{p.label}</span><span className="sm:hidden">{p.id === 'console' ? 'Consoles' : p.id === 'all' ? 'Tout' : p.label}</span>
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                    
-                    <main className="relative z-20 pb-28 md:pb-24 space-y-16 max-w-[1600px] mx-auto">
-                        <GameRow title="🔥 Tendances Semaine" endpoint={`/games?dates=${dates.lastWeek},${dates.today}&ordering=-added`} filter={platformFilter} onGameClick={openGameModal} />
-                        <GameRow title="🏆 Mieux Notés (Récent)" endpoint={`/games?dates=2023-01-01,${dates.today}&ordering=-metacritic`} filter={platformFilter} onGameClick={openGameModal} />
-                        <DealsRow title="💸 Promotions Chocs" onDealClick={(title) => { setSearchQuery(title); window.scrollTo({top: 0, behavior: 'smooth'}); }} />
-                        <GameRow title="📱 Pépites Mobiles" endpoint="/games?parent_platforms=4,8&ordering=-added" filter="" onGameClick={openGameModal} />
-                        <GameRow title="⚔️ Top Live & Esport" endpoint="/games?tags=esports,multiplayer&ordering=-rating" filter={platformFilter} onGameClick={openGameModal} />
-                        <GameRow title="✨ Sorties Récentes" endpoint={`/games?dates=${dates.lastMonth},${dates.today}&ordering=-released`} filter={platformFilter} onGameClick={openGameModal} />
-                        <GameRow title="👑 Chefs-d'œuvre Absolus" endpoint="/games?ordering=-rating&metacritic=90,100" filter={platformFilter} onGameClick={openGameModal} />
-                        <GameRow title="📅 Prochains Hits" endpoint={`/games?dates=${dates.today},${dates.nextYear}&ordering=-added`} filter={platformFilter} onGameClick={openGameModal} />
-                    </main>
-                </>
-            )}
-
-            {/* MODAL PROFIL / REGLAGES */}
-            {showSettings && (
-                <div className="fixed inset-0 z-[9999] bg-[#060608]/95 backdrop-blur-xl flex items-center justify-center p-4 animate-in fade-in">
-                    <div className="bg-[#151520] rounded-3xl p-8 max-w-sm w-full shadow-[0_0_80px_rgba(168,85,247,0.15)] relative border border-white/10">
-                        <button onClick={() => setShowSettings(false)} className="absolute top-5 right-5 text-white/30 hover:text-white outline-none transition-colors"><X className="w-6 h-6" /></button>
-                        
-                        <div className="flex flex-col items-center mb-10 mt-4">
-                            <div className="w-24 h-24 rounded-full bg-[#1a1a24] border-2 border-[#a855f7] flex items-center justify-center mb-5 shadow-[0_0_30px_rgba(168,85,247,0.3)]">
-                                <User className="w-10 h-10 text-white/80" />
-                            </div>
-                            <h3 className="text-2xl font-black uppercase tracking-[0.1em] text-white drop-shadow-md">{user.name}</h3>
-                            <span className="text-xs text-white/40 font-mono mt-2 px-3 py-1 bg-white/5 rounded-full border border-white/10">ID: {user.uid.substring(0,10)}</span>
-                        </div>
-
-                        <div className="space-y-4">
-                            <div className="flex items-center justify-between p-5 bg-white/5 rounded-2xl border border-white/5">
-                                <span className="text-xs font-bold uppercase tracking-widest text-white/70 flex items-center gap-3"><Globe className="w-4 h-4 text-[#a855f7]"/> Serveur</span>
-                                <span className="text-xs font-black text-[#a855f7] uppercase tracking-widest animate-pulse">Connecté</span>
-                            </div>
-                            <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="w-full flex items-center justify-between p-5 bg-[#1a1a24] hover:bg-white/10 rounded-2xl border border-white/5 text-white transition-colors outline-none mt-6 group">
-                                <span className="text-xs font-bold uppercase tracking-widest flex items-center gap-3 text-white/70 group-hover:text-white"><Zap className="w-4 h-4 text-red-400"/> Purger le système</span>
-                                <ChevronRight className="w-4 h-4 opacity-50 group-hover:opacity-100 group-hover:translate-x-1 transition-all"/>
+            <div className="pt-28 md:pt-32 px-4 md:px-8 lg:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto">
+                <PageHeader title="Boutiques" subtitle="Meilleures offres et baisses de prix" icon={<Tag className="w-6 h-6 md:w-8 md:h-8 text-[#4ade80]" />} color="from-[#4ade80]/10 to-transparent" borderColor="border-[#4ade80]/30" />
+                <DealsGrid stores={stores} onDealClick={(title) => { setSearchQuery(title); window.scrollTo({top: 0, behavior: 'smooth'}); }} />
+            </div>
+        ) : (
+            <>
+                <HeroBanner onPlay={() => heroGame && openGameModal(heroGame)} setHero={setHeroGame} />
+                
+                <div className="px-4 md:px-8 lg:px-12 relative z-20 max-w-[1600px] mx-auto -mt-6 md:-mt-8 mb-12 flex justify-center">
+                    <div className="flex flex-wrap justify-center gap-2 bg-[#151520]/80 backdrop-blur-xl p-2 rounded-3xl border border-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.5)] w-fit">
+                        {PLATFORMS.map(p => (
+                            <button key={p.id} onClick={() => setPlatformFilter(p.query)}
+                            className={`flex items-center gap-2 px-4 py-2 md:px-5 md:py-2.5 rounded-2xl md:rounded-full font-black uppercase tracking-widest text-[9px] md:text-xs transition-all whitespace-nowrap outline-none ${platformFilter === p.query ? 'bg-[#a855f7] text-white shadow-[0_0_20px_rgba(168,85,247,0.4)] scale-105' : 'text-white/50 hover:bg-white/10 hover:text-white'}`}>
+                                {p.icon} <span className="hidden sm:inline">{p.label}</span><span className="sm:hidden">{p.id === 'console' ? 'Consoles' : p.id === 'all' ? 'Tout' : p.label}</span>
                             </button>
-                        </div>
+                        ))}
                     </div>
                 </div>
-            )}
+                
+                <main className="relative z-20 pb-28 md:pb-24 space-y-12 md:space-y-16 max-w-[1600px] mx-auto">
+                    <GameRow title="🔥 Tendances" endpoint={`/games?dates=${dates.lastWeek},${dates.today}&ordering=-added`} filter={platformFilter} onGameClick={openGameModal} />
+                    <GameRow title="👑 Chefs-d'œuvre" endpoint="/games?ordering=-rating&metacritic=90,100" filter={platformFilter} onGameClick={openGameModal} />
+                    <DealsRow title="💸 Promotions" stores={stores} onDealClick={(title) => { setSearchQuery(title); window.scrollTo({top: 0, behavior: 'smooth'}); }} />
+                    <GameRow title="🌍 Aventures RPG" endpoint="/games?genres=role-playing-games-rpg,adventure&ordering=-added" filter={platformFilter} onGameClick={openGameModal} />
+                    <GameRow title="💥 Action / Shooters" endpoint="/games?genres=action,shooter&ordering=-added" filter={platformFilter} onGameClick={openGameModal} />
+                    <GameRow title="📅 Prochaines Sorties" endpoint={`/games?dates=${dates.today},${dates.nextYear}&ordering=-added`} filter={platformFilter} onGameClick={openGameModal} />
+                </main>
+            </>
+        )}
 
-            {/* MODAL DU JEU (HUB PRINCIPAL) */}
-            {selectedGameData && (
-                <GameDetailHub 
-                    gameId={selectedGameData.game.id} 
-                    initialGame={selectedGameData.game}
-                    initialStream={selectedGameData.stream} 
-                    onClose={closeGameModal} 
-                    user={user} db={db} APP_ID={APP_ID}
-                    watchlist={watchlist}
-                    setWatchlist={(newIds) => { setWatchlist(newIds); fetchWatchlistGames(newIds); }}
-                    showToast={showToast}
-                />
-            )}
+        {/* MODAL PROFIL / REGLAGES (DASHBOARD GIGANTESQUE) */}
+        {showSettings && (
+            <div className="fixed inset-0 z-[9999] bg-[#060608] flex flex-col md:flex-row animate-in slide-in-from-bottom duration-300">
+                
+                {/* Header Mobile Uniquement */}
+                <div className="md:hidden flex items-center justify-between p-4 bg-[#0a0a0f] border-b border-white/5 shrink-0">
+                    <span className="font-black uppercase tracking-[0.2em] text-white text-xs flex items-center gap-2"><Settings className="w-4 h-4 text-[#a855f7]"/> Centre de contrôle</span>
+                    <button onClick={() => setShowSettings(false)} className="p-2 bg-white/5 rounded-full text-white/50 hover:text-white"><X className="w-4 h-4" /></button>
+                </div>
+
+                {/* SIDEBAR NAVIGATION */}
+                <div className="w-full md:w-[280px] lg:w-[320px] bg-[#0a0a0f] border-b md:border-b-0 md:border-r border-white/5 flex flex-col shrink-0 overflow-hidden">
+                    
+                    {/* Header PC */}
+                    <div className="hidden md:flex items-center justify-between p-6 lg:p-8 border-b border-white/5">
+                        <span className="font-black uppercase tracking-[0.2em] text-white text-xs flex items-center gap-2"><Settings className="w-4 h-4 text-[#a855f7] animate-[spin_4s_linear_infinite]"/> Système</span>
+                        <button onClick={() => setShowSettings(false)} className="p-2 bg-white/5 rounded-full text-white/50 hover:text-white transition-colors active:scale-95"><X className="w-4 h-4" /></button>
+                    </div>
+
+                    {/* User Mini Card */}
+                    <div className="p-4 md:p-6 lg:p-8 border-b border-white/5 flex items-center gap-4 bg-gradient-to-b from-white/5 to-transparent">
+                        <div className="w-12 h-12 md:w-14 md:h-14 rounded-full bg-[#151520] flex items-center justify-center border border-[#a855f7]/30 text-[#a855f7] shrink-0 shadow-[0_0_15px_rgba(168,85,247,0.2)]">
+                            <User className="w-5 h-5 md:w-6 md:h-6" />
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                            <h3 className="font-black text-xs md:text-sm uppercase tracking-widest text-white truncate">{user.name}</h3>
+                            <span className="text-[9px] text-white/40 font-mono mt-0.5 truncate flex items-center gap-1"><Hash className="w-3 h-3"/> {user.uid.substring(0,10)}...</span>
+                        </div>
+                    </div>
+
+                    {/* Menus */}
+                    <div className="flex md:flex-col overflow-x-auto md:overflow-y-auto no-scrollbar p-2 md:p-4 gap-1">
+                        {[
+                            { id: 'account', icon: <User className="w-4 h-4"/>, label: 'Compte & Stats' },
+                            { id: 'appearance', icon: <Palette className="w-4 h-4"/>, label: 'Apparence & Vidéo' },
+                            { id: 'privacy', icon: <Shield className="w-4 h-4"/>, label: 'Confidentialité' },
+                            { id: 'integrations', icon: <Globe className="w-4 h-4"/>, label: 'Connexions' },
+                            { id: 'system', icon: <Cpu className="w-4 h-4"/>, label: 'Paramètres Système' }
+                        ].map(tab => (
+                            <button key={tab.id} onClick={() => setSettingsTab(tab.id)} 
+                                className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all outline-none shrink-0 md:w-full text-left
+                                ${settingsTab === tab.id ? 'bg-[#a855f7]/10 text-[#a855f7] border border-[#a855f7]/20 shadow-sm' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}>
+                                {tab.icon}
+                                <span className="text-[10px] md:text-xs font-bold uppercase tracking-widest whitespace-nowrap">{tab.label}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                {/* CONTENT AREA */}
+                <div className="flex-1 overflow-y-auto bg-[#060608] relative">
+                    <div className="max-w-4xl mx-auto p-4 md:p-8 lg:p-12 pb-24 md:pb-12 animate-in fade-in duration-300">
+                        
+                        {/* TAB: COMPTE & STATS */}
+                        {settingsTab === 'account' && (
+                            <div className="space-y-8">
+                                <div className="border-b border-white/5 pb-4">
+                                    <h2 className="text-lg md:text-xl font-black uppercase tracking-[0.2em] text-white">Mon Profil</h2>
+                                    <p className="text-[10px] md:text-xs text-white/40 uppercase tracking-widest mt-1">Gérez vos informations personnelles</p>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    {/* Edition Profil */}
+                                    <div className="bg-[#0a0a0f] p-5 rounded-2xl border border-white/5 space-y-4">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] uppercase font-bold text-white/50 tracking-widest">Nom de joueur</span>
+                                            {!isEditingName && <button onClick={() => {setIsEditingName(true); setEditNameValue(user.name);}} className="text-[9px] uppercase font-bold text-[#a855f7] hover:text-white transition-colors bg-[#a855f7]/10 px-2 py-1 rounded">Modifier</button>}
+                                        </div>
+                                        {isEditingName ? (
+                                            <div className="flex items-center gap-2">
+                                                <input type="text" value={editNameValue} onChange={e => setEditNameValue(e.target.value)} className="flex-1 bg-[#151520] border border-[#a855f7]/50 rounded-lg px-3 py-2 text-xs font-bold text-white outline-none focus:border-[#a855f7]" autoFocus />
+                                                <button onClick={saveProfile} className="p-2 bg-[#a855f7] hover:bg-purple-500 text-white rounded-lg transition-colors"><CheckCircle className="w-4 h-4"/></button>
+                                                <button onClick={() => setIsEditingName(false)} className="p-2 bg-white/5 hover:bg-white/10 text-white rounded-lg transition-colors"><X className="w-4 h-4"/></button>
+                                            </div>
+                                        ) : (
+                                            <div className="text-sm md:text-base font-black text-white">{user.name}</div>
+                                        )}
+                                        
+                                        <div className="pt-2">
+                                            <span className="text-[10px] uppercase font-bold text-white/50 tracking-widest">Adresse Email</span>
+                                            <div className="text-xs font-medium text-white mt-1 flex items-center justify-between">
+                                                joueur_anonyme@levelup.com 
+                                                <Lock className="w-3 h-3 text-white/20"/>
+                                            </div>
+                                        </div>
+                                        <div className="pt-2">
+                                            <span className="text-[10px] uppercase font-bold text-white/50 tracking-widest">Identifiant Cloud</span>
+                                            <div className="text-[10px] font-mono text-white/30 mt-1 truncate select-all bg-[#151520] px-2 py-1 rounded">{user.uid}</div>
+                                        </div>
+                                    </div>
+
+                                    {/* Stats Précises */}
+                                    <div className="bg-[#0a0a0f] p-5 rounded-2xl border border-white/5 space-y-4 flex flex-col justify-between">
+                                        <div className="flex items-center gap-3">
+                                            <Activity className="w-5 h-5 text-[#00ffcc]" />
+                                            <h3 className="text-[10px] md:text-xs font-black uppercase tracking-[0.2em]">Rapports d'Activité</h3>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div className="bg-[#151520] border border-white/5 p-3 rounded-xl">
+                                                <span className="text-[10px] uppercase tracking-widest text-white/40 block mb-1">Jeux Suivis</span>
+                                                <span className="text-xl md:text-2xl font-black text-[#00ffcc]">{watchlist.length}</span>
+                                            </div>
+                                            <div className="bg-[#151520] border border-white/5 p-3 rounded-xl">
+                                                <span className="text-[10px] uppercase tracking-widest text-white/40 block mb-1">Jeux Explorés</span>
+                                                <span className="text-xl md:text-2xl font-black text-white/90">{Object.keys(localStorage).filter(k => k.startsWith('game_detail')).length}</span>
+                                            </div>
+                                            <div className="bg-[#151520] border border-white/5 p-3 rounded-xl col-span-2 flex justify-between items-center">
+                                                <span className="text-[10px] uppercase tracking-widest text-white/40">Niveau Compte</span>
+                                                <span className="text-xs font-black text-[#a855f7] bg-[#a855f7]/10 px-2 py-1 rounded border border-[#a855f7]/20">VIP LEVEL 1</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* TAB: APPARENCE */}
+                        {settingsTab === 'appearance' && (
+                            <div className="space-y-8">
+                                <div className="border-b border-white/5 pb-4">
+                                    <h2 className="text-lg md:text-xl font-black uppercase tracking-[0.2em] text-white">Apparence & Multimédia</h2>
+                                    <p className="text-[10px] md:text-xs text-white/40 uppercase tracking-widest mt-1">Personnalisez votre interface visuelle</p>
+                                </div>
+
+                                <div className="space-y-3">
+                                    <h3 className="text-[10px] font-black uppercase tracking-widest text-white/30 ml-2">Interface Utilisateur</h3>
+                                    <SettingToggle title="Mode Cinématique" desc="Assombrit l'arrière-plan lors de l'ouverture des jeux" active={advancedPrefs.cinematicMode} onClick={() => togglePref('cinematicMode')} />
+                                    <SettingToggle title="Animations d'interface" desc="Activer les effets de survol et transitions (désactiver pour plus de perf)" active={advancedPrefs.animations} onClick={() => togglePref('animations')} />
+                                    <SettingToggle title="Mode Éco Données" desc="Réduit la qualité des images et évite le préchargement" active={preferences.dataSaver} onClick={() => { setPreferences(p => ({...p, dataSaver: !p.dataSaver})); showToast(preferences.dataSaver ? "Mode Éco désactivé" : "Mode Éco activé", "info"); }} color="bg-[#00ffcc]" />
+                                </div>
+
+                                <div className="space-y-3 pt-4 border-t border-white/5">
+                                    <h3 className="text-[10px] font-black uppercase tracking-widest text-white/30 ml-2">Contenu Multimédia</h3>
+                                    <SettingToggle title="Lecture Automatique" desc="Lancer automatiquement les bandes-annonces et streams Twitch" active={advancedPrefs.autoPlay} onClick={() => togglePref('autoPlay')} />
+                                    <SettingToggle title="Trailers Haute Qualité" desc="Forcer la résolution 1080p/4K quand disponible" active={advancedPrefs.hqTrailers} onClick={() => togglePref('hqTrailers')} />
+                                </div>
+                            </div>
+                        )}
+
+                        {/* TAB: CONFIDENTIALITE */}
+                        {settingsTab === 'privacy' && (
+                            <div className="space-y-8">
+                                <div className="border-b border-white/5 pb-4">
+                                    <h2 className="text-lg md:text-xl font-black uppercase tracking-[0.2em] text-white">Confidentialité & Sécurité</h2>
+                                    <p className="text-[10px] md:text-xs text-white/40 uppercase tracking-widest mt-1">Gérez qui peut voir votre profil</p>
+                                </div>
+
+                                <div className="space-y-3">
+                                    <SettingToggle title="Profil Public" desc="Permet aux autres joueurs de voir votre Radar et vos jeux récents" active={advancedPrefs.publicProfile} onClick={() => togglePref('publicProfile')} />
+                                    <SettingToggle title="Afficher l'activité" desc="Montrer 'En ligne' ou le jeu que vous regardez actuellement" active={advancedPrefs.showActivity} onClick={() => togglePref('showActivity')} />
+                                    <SettingToggle title="Accepter les messages (Non-Amis)" desc="Autoriser les invitations de personnes hors de votre liste" active={advancedPrefs.acceptMessages} onClick={() => togglePref('acceptMessages')} />
+                                </div>
+
+                                <div className="pt-4 border-t border-white/5">
+                                    <button className="flex items-center justify-between w-full p-4 bg-[#151520] hover:bg-white/5 rounded-2xl border border-white/5 transition-colors outline-none group">
+                                        <div className="flex items-center gap-3">
+                                            <Shield className="w-4 h-4 text-white/40 group-hover:text-white" />
+                                            <span className="text-[10px] md:text-xs font-bold uppercase tracking-widest text-white/70 group-hover:text-white">Gérer l'authentification à deux facteurs (2FA)</span>
+                                        </div>
+                                        <ChevronRight className="w-4 h-4 text-white/20 group-hover:text-white transition-transform group-hover:translate-x-1" />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* TAB: INTEGRATIONS */}
+                        {settingsTab === 'integrations' && (
+                            <div className="space-y-8">
+                                <div className="border-b border-white/5 pb-4">
+                                    <h2 className="text-lg md:text-xl font-black uppercase tracking-[0.2em] text-white">Connexions Réseaux</h2>
+                                    <p className="text-[10px] md:text-xs text-white/40 uppercase tracking-widest mt-1">Liez vos comptes pour plus de fonctionnalités</p>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {/* TWITCH (Reel) */}
+                                    <div className="bg-[#0a0a0f] p-5 rounded-2xl border border-[#6441a5]/20 flex flex-col items-start gap-4 hover:border-[#6441a5]/50 transition-colors">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-[#6441a5]/20 flex items-center justify-center text-[#6441a5]"><Tv className="w-5 h-5"/></div>
+                                            <div>
+                                                <h3 className="text-xs font-black uppercase tracking-widest">Twitch</h3>
+                                                <span className="text-[9px] text-white/40 font-bold uppercase">Chat Immersif en direct</span>
+                                            </div>
+                                        </div>
+                                        {twitchConnected ? (
+                                            <div className="w-full bg-[#6441a5]/10 border border-[#6441a5]/20 text-[#a855f7] text-[10px] font-black uppercase tracking-widest py-2 rounded-lg flex justify-center items-center gap-2"><CheckCircle className="w-4 h-4" /> Connecté</div>
+                                        ) : (
+                                            <button onClick={handleTwitchAuth} className="w-full bg-[#6441a5] hover:bg-[#503484] text-white text-[10px] font-black uppercase tracking-widest py-2 rounded-lg transition-colors">Lier le compte</button>
+                                        )}
+                                    </div>
+
+                                    {/* DISCORD (Mock) */}
+                                    <div className="bg-[#0a0a0f] p-5 rounded-2xl border border-[#5865F2]/20 flex flex-col items-start gap-4 hover:border-[#5865F2]/50 transition-colors">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-[#5865F2]/20 flex items-center justify-center text-[#5865F2]"><MessageSquare className="w-5 h-5"/></div>
+                                            <div>
+                                                <h3 className="text-xs font-black uppercase tracking-widest">Discord</h3>
+                                                <span className="text-[9px] text-white/40 font-bold uppercase">Synchronisation de statut</span>
+                                            </div>
+                                        </div>
+                                        <button className="w-full bg-[#5865F2]/10 hover:bg-[#5865F2]/20 border border-[#5865F2]/30 text-[#5865F2] text-[10px] font-black uppercase tracking-widest py-2 rounded-lg transition-colors">Connecter</button>
+                                    </div>
+
+                                    {/* STEAM (Mock) */}
+                                    <div className="bg-[#0a0a0f] p-5 rounded-2xl border border-white/10 flex flex-col items-start gap-4 hover:border-white/30 transition-colors">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center text-white/90"><MonitorPlay className="w-5 h-5"/></div>
+                                            <div>
+                                                <h3 className="text-xs font-black uppercase tracking-widest">Steam</h3>
+                                                <span className="text-[9px] text-white/40 font-bold uppercase">Importation Bibliothèque</span>
+                                            </div>
+                                        </div>
+                                        <button className="w-full bg-white/5 hover:bg-white/10 border border-white/10 text-white/70 text-[10px] font-black uppercase tracking-widest py-2 rounded-lg transition-colors">Connecter</button>
+                                    </div>
+                                    
+                                    {/* FIREBASE (Reel) */}
+                                    <div className="bg-[#0a0a0f] p-5 rounded-2xl border border-orange-500/20 flex flex-col items-start gap-4 hover:border-orange-500/50 transition-colors">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center text-orange-500"><Server className="w-5 h-5"/></div>
+                                            <div>
+                                                <h3 className="text-xs font-black uppercase tracking-widest">Cloud Sync</h3>
+                                                <span className="text-[9px] text-white/40 font-bold uppercase">Sauvegarde Firebase</span>
+                                            </div>
+                                        </div>
+                                        <div className="w-full bg-orange-500/10 border border-orange-500/20 text-orange-400 text-[10px] font-black uppercase tracking-widest py-2 rounded-lg flex justify-center items-center gap-2"><span className="w-1.5 h-1.5 bg-orange-500 rounded-full animate-pulse"></span> Actif</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* TAB: SYSTEME */}
+                        {settingsTab === 'system' && (
+                            <div className="space-y-8">
+                                <div className="border-b border-white/5 pb-4">
+                                    <h2 className="text-lg md:text-xl font-black uppercase tracking-[0.2em] text-white">Système & Avancé</h2>
+                                    <p className="text-[10px] md:text-xs text-white/40 uppercase tracking-widest mt-1">Maintenance et contrôle de l'application</p>
+                                </div>
+
+                                <div className="bg-[#0a0a0f] rounded-2xl border border-white/5 overflow-hidden">
+                                    <div className="p-5 border-b border-white/5 flex items-center justify-between">
+                                        <div>
+                                            <span className="text-xs font-black uppercase tracking-widest text-white/90 block mb-1">Stockage Local (Cache)</span>
+                                            <span className="text-[9px] text-white/40 font-bold uppercase">{Object.keys(localStorage).length} éléments sauvegardés en local</span>
+                                        </div>
+                                        <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="px-4 py-2 bg-red-500/10 hover:bg-red-500 border border-red-500/20 hover:border-red-500 text-red-400 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2 outline-none">
+                                            <Zap className="w-3 h-3" /> Vider
+                                        </button>
+                                    </div>
+                                    
+                                    <SettingToggle title="Notifications Système" desc="Recevoir des alertes sur l'état de l'API (Erreurs 401, Quotas)" active={preferences.notifs} onClick={() => { setPreferences(p => ({...p, notifs: !p.notifs})); }} />
+                                    
+                                    <div className="p-5 flex items-center justify-between bg-white/[0.02]">
+                                        <div>
+                                            <span className="text-xs font-black uppercase tracking-widest text-white/90 block mb-1">Version de l'Application</span>
+                                            <span className="text-[9px] text-white/40 font-bold uppercase">LevelUp Engine v2.4.1 (Stable)</span>
+                                        </div>
+                                        <span className="px-3 py-1 bg-[#a855f7]/10 text-[#a855f7] border border-[#a855f7]/20 rounded-md text-[9px] font-black uppercase tracking-widest">À Jour</span>
+                                    </div>
+                                </div>
+
+                                <div className="pt-8">
+                                    <button className="flex items-center gap-3 text-red-500 hover:text-red-400 text-xs font-black uppercase tracking-widest transition-colors outline-none px-4 py-3 rounded-xl hover:bg-red-500/10 border border-transparent hover:border-red-500/20 w-full justify-center md:w-auto md:justify-start">
+                                        <LogOut className="w-4 h-4" /> Déconnecter le compte cloud
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* MODAL DU JEU (HUB PRINCIPAL) */}
+        {selectedGameData && (
+            <GameDetailHub 
+                gameId={selectedGameData.game.id} 
+                initialGame={selectedGameData.game}
+                initialStream={selectedGameData.stream} 
+                onClose={closeGameModal} 
+                user={user} db={db} APP_ID={APP_ID}
+                watchlist={watchlist}
+                setWatchlist={(newIds) => { setWatchlist(newIds); fetchWatchlistGames(newIds); }}
+                showToast={showToast} stores={stores} twitchConnected={twitchConnected}
+            />
+        )}
+    </div>
+);
+}
+
+// --- PETITS COMPOSANTS UI ---
+// Nouveau composant "SettingToggle" fin et élégant
+function SettingToggle({ title, desc, active, onClick, color = "bg-[#a855f7]" }) {
+    return (
+        <div className="flex items-center justify-between p-4 bg-[#151520] rounded-xl border border-white/5 hover:bg-[#1a1a24] transition-colors group">
+            <div className="flex flex-col pr-4">
+                <span className="text-[10px] md:text-xs font-bold uppercase tracking-widest text-white/90 group-hover:text-white transition-colors">{title}</span>
+                <span className="text-[8px] md:text-[9px] text-white/40 mt-1 leading-snug">{desc}</span>
+            </div>
+            <button onClick={onClick} className={`w-10 h-5 md:w-12 md:h-6 rounded-full transition-colors relative shadow-inner shrink-0 outline-none ${active ? color : 'bg-white/10'}`}>
+                <div className={`absolute top-0.5 w-4 h-4 md:w-5 md:h-5 rounded-full bg-white transition-all shadow-md ${active ? 'left-[22px] md:left-[26px]' : 'left-0.5'}`}></div>
+            </button>
         </div>
     );
 }
 
-// --- PETITS COMPOSANTS UI ---
+const LoadingText = ({ color = "text-[#a855f7]", borderColor = "border-[#a855f7]" }) => (
+    <div className={`flex flex-col items-center justify-center py-20 ${color}`}>
+        <div className={`w-8 h-8 border-4 border-t-transparent ${borderColor} rounded-full animate-spin mb-4 shadow-[0_0_15px_currentColor]`}></div>
+        <span className="text-xs font-black uppercase tracking-[0.2em] animate-pulse">Chargement...</span>
+    </div>
+);
+
 function MobileNavBtn({ active, onClick, icon, label }) {
     return (
-        <button onClick={onClick} className={`flex flex-col items-center gap-1.5 transition-colors outline-none min-w-[64px] flex-shrink-0 relative ${active ? 'text-white' : 'text-white/40 hover:text-white/70'}`}>
+        <button onClick={onClick} className={`flex flex-col items-center gap-1 transition-colors outline-none min-w-[60px] flex-shrink-0 relative ${active ? 'text-white' : 'text-white/40 hover:text-white/70'}`}>
             <div className={`p-1.5 rounded-lg transition-all ${active ? 'text-[#a855f7] shadow-[0_0_15px_rgba(168,85,247,0.3)] bg-white/5' : ''}`}>
                 {icon}
             </div>
-            <span className="text-[9px] font-bold uppercase tracking-widest">{label}</span>
+            <span className="text-[8px] font-bold uppercase tracking-widest">{label}</span>
         </button>
     );
 }
 
 function PageHeader({ title, subtitle, icon, color, borderColor }) {
     return (
-        <div className={`bg-[#151520] border border-white/5 rounded-3xl p-6 md:p-12 mb-8 md:mb-12 flex flex-col md:flex-row items-start md:items-center gap-4 md:gap-6 shadow-2xl relative overflow-hidden`}>
+        <div className={`bg-[#151520] border border-white/5 rounded-3xl p-6 md:p-10 mb-8 md:mb-12 flex flex-col md:flex-row items-start md:items-center gap-4 shadow-2xl relative overflow-hidden`}>
             <div className={`absolute top-0 left-0 w-2 h-full bg-gradient-to-b ${color.replace('from-', 'from-').replace('/10', '')} to-transparent`}></div>
-            <div className={`p-4 md:p-5 bg-[#060608] rounded-2xl border ${borderColor} shadow-lg`}>
+            <div className={`p-4 md:p-5 bg-[#060608] rounded-2xl border ${borderColor} shadow-lg shrink-0`}>
                 {icon}
             </div>
             <div>
-                <h2 className="text-xl md:text-4xl font-black uppercase tracking-[0.2em] text-white mb-2 md:mb-3 drop-shadow-md">{title}</h2>
-                <p className="text-white/50 text-[10px] md:text-sm font-medium uppercase tracking-widest">{subtitle}</p>
+                <h2 className="text-xl md:text-3xl font-black uppercase tracking-[0.2em] text-white mb-1 md:mb-2 drop-shadow-md">{title}</h2>
+                <p className="text-white/50 text-[10px] md:text-xs font-bold uppercase tracking-widest">{subtitle}</p>
             </div>
         </div>
     );
 }
 
-// --- PAGE: SESSIONS LIVE TWITCH (Uniquement les vrais streams actifs) ---
-function LiveSessionsPage({ onPlay }) {
-    const [streams, setStreams] = useState([]);
-    const [loading, setLoading] = useState(true);
+// --- GRILLE A DEFILEMENT INFINI ---
+function InfiniteGameGrid({ endpoint, onGameClick }) {
+    const [games, setGames] = useState([]);
+    const [page, setPage] = useState(1);
+    const [loading, setLoading] = useState(false);
+    const [apiError, setApiError] = useState(false);
+    const loaderRef = useRef(null);
 
-    // SYSTEME DE SECOURS : Si l'API Twitch est hors ligne, on charge ces chaînes réelles et ultra-populaires.
-    const FALLBACK_STREAMS = [
-        {
-            name: "Riot Games - LCS", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_riotgames-440x248.jpg", view_count: 145000, external_id: "riotgames", description: "League of Legends Esports",
-            gameObj: { id: 13633, name: "League of Legends", background_image: "https://media.rawg.io/media/games/78b/78bc81e247fc7e77af700225ea58c6ae.jpg" }
-        },
-        {
-            name: "ESL CS - Pro League", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_eslcs-440x248.jpg", view_count: 85000, external_id: "eslcs", description: "Counter-Strike Professional Tournaments",
-            gameObj: { id: 4291, name: "Counter-Strike: Global Offensive", background_image: "https://media.rawg.io/media/games/736/73619bd336c894d6941d926bfd563946.jpg" }
-        },
-        {
-            name: "VALORANT Champions Tour", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_valorant-440x248.jpg", view_count: 95000, external_id: "valorant", description: "Official VALORANT Broadcasts",
-            gameObj: { id: 436173, name: "VALORANT", background_image: "https://media.rawg.io/media/games/b11/b115b2bc6a5957a917bc7601f4abdda2.jpg" }
-        },
-        {
-            name: "Gotaga", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_gotaga-440x248.jpg", view_count: 45000, external_id: "gotaga", description: "Le French Monster",
-            gameObj: { id: 58879, name: "Call of Duty: Warzone", background_image: "https://media.rawg.io/media/games/cfb/cfb41cebf8b1223943bf1e02cd0cc2a1.jpg" }
-        },
-        {
-            name: "Kameto", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_kamet0-440x248.jpg", view_count: 38000, external_id: "kamet0", description: "Karmine Corp CEO",
-            gameObj: { id: 13633, name: "League of Legends", background_image: "https://media.rawg.io/media/games/78b/78bc81e247fc7e77af700225ea58c6ae.jpg" }
-        },
-        {
-            name: "Tarik", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_tarik-440x248.jpg", view_count: 55000, external_id: "tarik", description: "VALORANT Watch Parties",
-            gameObj: { id: 436173, name: "VALORANT", background_image: "https://media.rawg.io/media/games/b11/b115b2bc6a5957a917bc7601f4abdda2.jpg" }
-        },
-        {
-            name: "KaiCenat", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_kaicenat-440x248.jpg", view_count: 110000, external_id: "kaicenat", description: "AMP & Gaming",
-            gameObj: { id: 3498, name: "Grand Theft Auto V", background_image: "https://media.rawg.io/media/games/20a/20aa03a10cda45239fe22d035c0ebe64.jpg" }
-        },
-        {
-            name: "LIRIK", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_lirik-440x248.jpg", view_count: 25000, external_id: "lirik", description: "Variety Gaming",
-            gameObj: { id: 22509, name: "Minecraft", background_image: "https://media.rawg.io/media/games/b4e/b4e4c73d5aa427ed40edb0f68ddcb8bf.jpg" }
+    const loadMore = useCallback(async () => {
+        if (loading || apiError || isRawgDead) return;
+        setLoading(true);
+        const data = await fetchCached(`${RAWG_BASE}${endpoint}&key=${RAWG_API_KEY}&page_size=24&page=${page}`, `infinite_${endpoint}_p${page}`);
+        if (data && data.results) {
+            setGames(prev => [...prev, ...data.results]);
+            setPage(p => p + 1);
+        } else if (!data && page === 1) {
+            setApiError(true);
         }
-    ];
+        setLoading(false);
+    }, [endpoint, page, loading, apiError]);
+
+    useEffect(() => { setGames([]); setPage(1); setApiError(false); }, [endpoint]);
 
     useEffect(() => {
-        const fetchLives = async () => {
-            try {
-                const res = await fetch(`${RAWG_BASE}/games?ordering=-added&page_size=40&key=${RAWG_API_KEY}`);
-                const gamesData = await res.json();
-                
-                let allStreams = [];
-                const promises = gamesData.results.map(async (g) => {
-                    try {
-                        const tRes = await fetch(`${RAWG_BASE}/games/${g.id}/twitch?key=${RAWG_API_KEY}`);
-                        const tData = await tRes.json();
-                        
-                        if (tData.results && tData.results.length > 0) {
-                            tData.results.forEach(s => {
-                                if (s.external_id) {
-                                    allStreams.push({ ...s, gameObj: g });
-                                }
-                            });
-                        }
-                    } catch (e) {} 
-                });
-                
-                await Promise.all(promises);
-                allStreams.sort((a, b) => b.view_count - a.view_count);
-
-                const uniqueStreams = [];
-                const seenIds = new Set();
-                for (let s of allStreams) {
-                    if (!seenIds.has(s.external_id)) {
-                        seenIds.add(s.external_id);
-                        uniqueStreams.push(s);
-                    }
-                }
-
-                // SI L'API RAWG EST CASSÉE (Ce qui arrive souvent), ON INJECTE NOTRE LISTE GARANTIE
-                if (uniqueStreams.length === 0) {
-                    setStreams(FALLBACK_STREAMS);
-                } else {
-                    setStreams(uniqueStreams.slice(0, 20));
-                }
-                
-                setLoading(false);
-            } catch(e) { 
-                // En cas d'erreur réseau, on utilise le Fallback
-                setStreams(FALLBACK_STREAMS);
-                setLoading(false); 
-            }
-        };
-        fetchLives();
-    }, []);
+        const observer = new IntersectionObserver(entries => { if (entries[0].isIntersecting) loadMore(); }, { threshold: 0.1 });
+        if (loaderRef.current) observer.observe(loaderRef.current);
+        return () => observer.disconnect();
+    }, [loadMore]);
 
     return (
-        <div className="pt-28 md:pt-32 px-4 md:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto animate-in fade-in duration-500">
-            <PageHeader title="Sessions Live" subtitle="Les diffusions Twitch les plus chaudes" icon={<><Tv className="w-6 h-6 md:w-8 md:h-8 text-red-500" /><span className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full animate-pulse border-2 border-[#060608]"></span></>} color="from-red-500/10 to-transparent" borderColor="border-red-500/30" />
-            
-            {loading ? (
-                <div className="flex justify-center py-32"><Zap className="w-10 h-10 text-red-500 animate-pulse" /></div>
+        <div>
+            {(apiError || isRawgDead) && games.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 bg-[#151520] rounded-3xl border border-white/5 mt-8">
+                    <AlertTriangle className="w-10 h-10 text-red-500 mb-4 opacity-50" />
+                    <span className="text-white/50 text-xs font-bold uppercase tracking-widest text-center">Données hors ligne.<br/>Les quotas de l'API sont épuisés.</span>
+                </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                    {streams.map((s, idx) => (
-                        <div key={idx} onClick={() => onPlay(s.gameObj, s)} className="bg-[#151520] border border-white/5 rounded-2xl overflow-hidden group cursor-pointer hover:border-red-500/50 transition-all shadow-xl flex flex-col h-full hover:scale-[1.02]">
-                            <div className="relative aspect-video w-full bg-[#060608]">
-                                <img src={s.thumbnail} alt={s.name} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" loading="lazy" />
-                                <div className="absolute top-2 left-2 px-2.5 py-1 bg-red-600 text-white text-[9px] font-black uppercase tracking-widest rounded flex items-center gap-1.5 shadow-lg">
-                                    <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span> LIVE
-                                </div>
-                                <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/80 backdrop-blur text-white text-[10px] font-bold rounded flex items-center gap-1.5">
-                                    <Users className="w-3 h-3 text-red-400" /> {s.view_count?.toLocaleString()}
-                                </div>
-                                <div className="absolute inset-0 bg-gradient-to-t from-[#151520] via-transparent to-transparent opacity-60 group-hover:opacity-100 transition-opacity"></div>
-                            </div>
-                            <div className="p-5 flex flex-col flex-1">
-                                <div className="text-xs text-red-400 font-black uppercase tracking-[0.15em] mb-2 truncate">{s.gameObj.name}</div>
-                                <h3 className="font-bold text-sm text-white/90 mb-2 line-clamp-2 leading-snug">{s.name}</h3>
-                                <p className="text-[11px] text-white/40 line-clamp-2 mt-auto italic">"{s.description || "Aucune description"}"</p>
-                            </div>
-                        </div>
-                    ))}
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6">
+                    {games.map((game, i) => <GameCard key={`${game.id}-${i}`} game={game} onClick={() => onGameClick(game)} />)}
                 </div>
             )}
+            <div ref={loaderRef} className="w-full h-20 flex items-center justify-center mt-8">
+                {loading && <LoadingText />}
+            </div>
         </div>
     );
 }
 
-// --- GRILLES (POUR LES PAGES STANDARDS) ---
-function GameGrid({ endpoint, onGameClick, showReleaseDate = false }) {
-    const [games, setGames] = useState([]);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        const fetchGames = async () => {
-            try {
-                const res = await fetch(`${RAWG_BASE}${endpoint}&key=${RAWG_API_KEY}&page_size=24`);
-                const data = await res.json();
-                setGames(data.results || []);
-                setLoading(false);
-            } catch(e) { setLoading(false); }
-        };
-        fetchGames();
-    }, [endpoint]);
-
-    if (loading) return <div className="flex justify-center py-32"><Zap className="w-10 h-10 text-[#a855f7] animate-pulse" /></div>;
-
-    return (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6">
-            {games.map(game => (
-                <div key={game.id} className="relative">
-                    <GameCard game={game} onClick={() => onGameClick(game)} />
-                    {showReleaseDate && game.released && (
-                        <div className="absolute -top-2 -right-2 bg-[#a855f7] text-white text-[9px] font-black px-2.5 py-1 rounded-full shadow-lg z-10 border border-white/20 uppercase tracking-widest">
-                            {new Date(game.released).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
-                        </div>
-                    )}
-                </div>
-            ))}
-        </div>
-    );
-}
-
-function DealsGrid({ onDealClick }) {
+// --- DEALS GRID ---
+function DealsGrid({ stores, onDealClick }) {
     const [deals, setDeals] = useState([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         const fetchDeals = async () => {
-            try {
-                const res = await fetch(`${CHEAPSHARK_BASE}/deals?storeID=1&lowerPrice=2&upperPrice=30&pageSize=24&sortBy=Metacritic`);
-                const data = await res.json();
-                setDeals(data || []);
-                setLoading(false);
-            } catch(e) { setLoading(false); }
+            const data = await fetchCached(`${CHEAPSHARK_BASE}/deals?storeID=1&lowerPrice=2&upperPrice=30&pageSize=24&sortBy=Metacritic`, 'deals_grid', 3600000);
+            if (data) setDeals(data);
+            setLoading(false);
         };
         fetchDeals();
     }, []);
 
-    if (loading) return <div className="flex justify-center py-32"><Zap className="w-10 h-10 text-[#4ade80] animate-pulse" /></div>;
+    if (loading) return <div className="flex justify-center py-32"><LoadingText color="text-[#4ade80]" borderColor="border-[#4ade80]" /></div>;
+    if (!deals || deals.length === 0) return <div className="text-center py-20 text-white/50 bg-[#151520] rounded-3xl mx-4">Aucune donnée trouvée. Erreur API possible.</div>;
 
     return (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6">
-            {deals.map(deal => (
-                <div key={deal.dealID} onClick={() => onDealClick(deal.title)} className="bg-[#151520] border border-white/5 rounded-2xl overflow-hidden group cursor-pointer hover:border-[#4ade80]/50 hover:bg-[#1a1a24] transition-all hover:shadow-[0_0_30px_rgba(74,222,128,0.1)] flex h-32 md:h-36">
-                    <div className="relative w-28 md:w-32 shrink-0 bg-[#060608]">
-                        <img src={deal.thumb} alt={deal.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-                        <div className="absolute inset-0 bg-gradient-to-r from-transparent to-[#151520] group-hover:to-[#1a1a24] transition-colors"></div>
-                    </div>
-                    <div className="p-4 md:p-5 flex flex-col justify-center flex-1 min-w-0">
-                        <div className="text-[#4ade80] font-black text-[9px] uppercase tracking-widest bg-[#4ade80]/10 border border-[#4ade80]/20 w-fit px-2 py-0.5 rounded mb-2 shadow-sm">-{Math.round(deal.savings)}%</div>
-                        <h3 className="font-bold text-xs md:text-sm truncate text-white/90 mb-1">{deal.title}</h3>
-                        <div className="flex items-center gap-3 mt-auto">
-                            <span className="text-white font-black text-lg md:text-xl">${deal.salePrice}</span>
-                            <span className="text-white/30 text-[10px] md:text-xs font-bold line-through">${deal.normalPrice}</span>
+            {deals.map(deal => {
+                const storeInfo = stores && stores[deal.storeID];
+                return (
+                    <div key={deal.dealID} onClick={() => onDealClick(deal.title)} className="bg-[#151520] border border-white/5 rounded-2xl overflow-hidden group cursor-pointer hover:border-[#4ade80]/50 hover:bg-[#1a1a24] transition-all hover:shadow-[0_0_30px_rgba(74,222,128,0.1)] flex h-32 md:h-36">
+                        <div className="relative w-28 md:w-32 shrink-0 bg-[#060608]">
+                            <img src={deal.thumb} alt={deal.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                            <div className="absolute inset-0 bg-gradient-to-r from-transparent to-[#151520] group-hover:to-[#1a1a24] transition-colors"></div>
+                        </div>
+                        <div className="p-4 md:p-5 flex flex-col justify-center flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-2">
+                                <div className="text-[#4ade80] font-black text-[9px] uppercase tracking-widest bg-[#4ade80]/10 border border-[#4ade80]/20 w-fit px-2 py-0.5 rounded shadow-sm">-{Math.round(deal.savings)}%</div>
+                                {storeInfo && <span className="text-[9px] text-white/50 font-bold uppercase truncate">{storeInfo.storeName}</span>}
+                            </div>
+                            <h3 className="font-bold text-xs md:text-sm truncate text-white/90 mb-1">{deal.title}</h3>
+                            <div className="flex items-center gap-3 mt-auto">
+                                <span className="text-white font-black text-lg md:text-xl">${deal.salePrice}</span>
+                                <span className="text-white/30 text-[10px] md:text-xs font-bold line-through">${deal.normalPrice}</span>
+                            </div>
                         </div>
                     </div>
-                </div>
-            ))}
+                );
+            })}
         </div>
     );
 }
 
-// --- ACCUEIL COMPOSANTS ---
+// --- HERO BANNER ---
 function HeroBanner({ onPlay, setHero }) {
     const [game, setGame] = useState(null);
+    const [details, setDetails] = useState(null);
+    const [apiError, setApiError] = useState(false);
 
     useEffect(() => {
         const fetchHero = async () => {
+            if (isRawgDead) return setApiError(true);
             try {
-                const res = await fetch(`${RAWG_BASE}/games?key=${RAWG_API_KEY}&dates=${dates.lastMonth},${dates.today}&ordering=-added&page_size=5`);
-                const data = await res.json();
-                if (data.results && data.results.length > 0) {
-                    const selected = data.results[0]; 
+                const data = await fetchCached(`${RAWG_BASE}/games?key=${RAWG_API_KEY}&dates=${dates.lastMonth},${dates.today}&ordering=-added&page_size=10`, 'hero_games', 3600000);
+                if (data?.results?.length > 0) {
+                    const valid = data.results.filter(g => g.background_image);
+                    const selected = valid[0] || data.results[0]; 
                     setGame(selected); setHero(selected);
+                    
+                    const dData = await fetchCached(`${RAWG_BASE}/games/${selected.id}?key=${RAWG_API_KEY}`, `game_detail_${selected.id}`);
+                    setDetails(dData);
+                } else {
+                    setApiError(true);
                 }
-            } catch(e) {}
+            } catch(e) { setApiError(true); }
         };
         fetchHero();
     }, []);
 
-    if (!game) return <div className="h-[70vh] md:h-[80vh] bg-[#060608] animate-pulse"></div>;
+    // GESTION DU CRASH
+    if (apiError || isRawgDead) return (
+        <div className="h-[70vh] md:h-[80vh] bg-[#060608] flex flex-col items-center justify-center border-b border-white/5 px-4 text-center mt-0">
+            <AlertTriangle className="w-12 h-12 md:w-16 md:h-16 text-red-500 mb-4 md:mb-6 opacity-60" />
+            <h2 className="text-xl md:text-3xl font-black text-white uppercase tracking-[0.2em] mb-2">Mode Hors-Ligne</h2>
+            <p className="text-white/50 text-[10px] md:text-xs font-bold uppercase tracking-widest max-w-md">L'API externe est bloquée pour préserver vos quotas (ou clé API expirée).</p>
+        </div>
+    );
+
+    if (!game) return <div className="h-[70vh] md:h-[80vh] bg-[#060608] animate-pulse flex items-center justify-center"><LoadingText /></div>;
 
     return (
-        <div className="relative h-[70vh] md:h-[85vh] min-h-[500px] flex items-end pb-20 md:pb-24 px-4 md:px-12 mt-0">
+        <div className="relative h-[70vh] md:h-[85vh] min-h-[500px] flex items-end pb-20 md:pb-24 px-4 md:px-8 lg:px-12 mt-0">
             <div className="absolute inset-0 z-0">
                 <img src={game.background_image} alt={game.name} className="w-full h-full object-cover opacity-60" />
                 <div className="absolute inset-0 bg-gradient-to-t from-[#060608] via-[#060608]/50 to-transparent"></div>
@@ -698,31 +976,30 @@ function HeroBanner({ onPlay, setHero }) {
                     <span className="px-3 py-1.5 md:px-4 md:py-1.5 bg-[#a855f7]/20 border border-[#a855f7]/40 text-[#a855f7] text-[9px] md:text-[10px] font-black uppercase tracking-[0.2em] rounded flex items-center gap-1.5 md:gap-2 backdrop-blur-sm">
                         <Flame className="w-3.5 h-3.5" /> À La Une
                     </span>
-                    <span className="text-white/50 text-[10px] md:text-xs font-bold tracking-widest uppercase">{game.released?.substring(0,4)}</span>
-                </div>
-                
-                <h1 className="text-4xl md:text-7xl lg:text-[6rem] font-black text-white uppercase tracking-tighter leading-[0.9] mb-6 md:mb-8 drop-shadow-2xl max-w-4xl">{game.name}</h1>
-                
-                <div className="flex flex-wrap items-center gap-4 md:gap-6 mb-8 md:mb-10 text-xs md:text-sm font-medium">
-                    {game.metacritic && (
-                        <div className="flex items-center gap-2">
-                            <span className="text-[#00ffcc] font-black text-lg md:text-xl">{game.metacritic}</span>
-                            <span className="text-white/40 text-[9px] md:text-[10px] font-bold uppercase tracking-[0.2em]">Metascore</span>
-                        </div>
+                    <span className="text-white/50 text-[10px] md:text-xs font-bold tracking-widest uppercase">
+                        SORTIE: {formatDateExact(game.released)}
+                    </span>
+                    {details?.developers?.[0] && (
+                        <>
+                            <span className="text-white/20">•</span>
+                            <span className="text-[#00ffcc] text-[10px] md:text-xs font-bold uppercase tracking-widest">
+                                DEV: {details.developers[0].name}
+                            </span>
+                        </>
                     )}
-                    <div className="hidden sm:block w-px h-6 bg-white/10"></div>
-                    <div className="flex flex-wrap items-center gap-2 md:gap-3 text-white/70 text-[10px] md:text-xs font-bold uppercase tracking-[0.15em]">
-                        {game.genres?.slice(0,3).map((g, idx) => (
-                            <React.Fragment key={g.id}>
-                                <span>{g.name}</span>{idx < Math.min(game.genres.length, 3) - 1 && <span className="text-white/20">•</span>}
-                            </React.Fragment>
-                        ))}
-                    </div>
                 </div>
-
-                <div className="flex flex-col sm:flex-row gap-4 md:gap-5 w-full sm:w-auto">
-                    <button onClick={onPlay} className="px-8 py-4 md:px-10 md:py-5 bg-white text-black hover:bg-[#a855f7] hover:text-white rounded-xl font-black uppercase tracking-[0.2em] text-xs md:text-sm transition-all shadow-[0_0_30px_rgba(255,255,255,0.15)] hover:shadow-[0_0_40px_rgba(168,85,247,0.4)] active:scale-95 outline-none flex items-center justify-center gap-3">
-                        <Play className="w-4 h-4 md:w-5 md:h-5 fill-current" /> Accéder
+                
+                <h1 className="text-4xl md:text-7xl lg:text-[6rem] font-black text-white uppercase tracking-tighter leading-[0.9] mb-4 md:mb-6 drop-shadow-2xl max-w-4xl">{game.name}</h1>
+                
+                {details?.description_raw && (
+                    <p className="hidden sm:block text-white/70 text-xs md:text-sm max-w-2xl mb-6 md:mb-8 line-clamp-3 leading-relaxed">
+                        {details.description_raw}
+                    </p>
+                )}
+                
+                <div className="flex flex-wrap items-center gap-4 md:gap-6 mb-8 md:mb-10 text-xs md:text-sm font-medium mt-4 sm:mt-0">
+                    <button onClick={onPlay} className="px-6 py-3 md:px-8 md:py-4 bg-[#a855f7] hover:bg-purple-500 text-white rounded-full font-black uppercase tracking-widest text-xs md:text-sm transition-all shadow-[0_0_20px_rgba(168,85,247,0.4)] flex items-center gap-2">
+                        <Play className="w-4 h-4 md:w-5 md:h-5 fill-current" /> Explorer le jeu
                     </button>
                 </div>
             </div>
@@ -730,108 +1007,204 @@ function HeroBanner({ onPlay, setHero }) {
     );
 }
 
-function GameRow({ title, endpoint, filter, onGameClick }) {
-    const [games, setGames] = useState([]);
-    const scrollRef = useDragToScroll();
+// --- PAGE SESSIONS LIVE (INFINI) ---
+function LiveSessionsPage({ onPlay }) {
+    const [streams, setStreams] = useState([]);
+    const [page, setPage] = useState(1);
+    const [loading, setLoading] = useState(false);
+    const [apiError, setApiError] = useState(false);
+    const loaderRef = useRef(null);
+
+    const loadMoreLives = useCallback(async () => {
+        if(loading || isRawgDead || apiError) return;
+        setLoading(true);
+        try {
+            const data = await fetchCached(`${RAWG_BASE}/games?tags=esports,multiplayer&ordering=-rating&page_size=20&page=${page}&key=${RAWG_API_KEY}`, `lives_games_p${page}`);
+            
+            // Si l'API renvoie null (Quota dépassé ou Clé expirée)
+            if (!data) {
+                setApiError(true);
+                if (page === 1) { // Sécurité : On affiche un faux stream pour habiller la page si vide
+                    setStreams([{ name: "[HORS LIGNE] Riot Games - LCS", thumbnail: "https://static-cdn.jtvnw.net/previews-ttv/live_user_riotgames-440x248.jpg", view_count: 0, external_id: "riotgames", gameObj: { name: "League of Legends" } }]);
+                }
+                setLoading(false);
+                return;
+            }
+
+            const newGames = data.results || [];
+            let newStreams = [];
+            
+            // FETCH SÉQUENTIEL (Au lieu de Promise.all) -> Protège contre le DDoS des requêtes Twitch et bloque si 401
+            for (const g of newGames) {
+                if (isRawgDead) break; // Arrêt immédiat si une des requêtes déclenche le disjoncteur 401
+                const tData = await fetchCached(`${RAWG_BASE}/games/${g.id}/twitch?key=${RAWG_API_KEY}`, `lives_twitch_${g.id}`, 300000);
+                if (tData && tData.results) {
+                    tData.results.forEach(s => { if (s.external_id) newStreams.push({ ...s, gameObj: g }); });
+                }
+            }
+
+            setStreams(prev => {
+                const combined = [...prev, ...newStreams];
+                const unique = Array.from(new Map(combined.map(s => [s.external_id, s])).values());
+                return unique.sort((a,b) => b.view_count - a.view_count);
+            });
+            setPage(p => p + 1);
+        } catch(e) {}
+        setLoading(false);
+    }, [page, loading, apiError]);
 
     useEffect(() => {
-        const fetchGames = async () => {
-            try {
-                const res = await fetch(`${RAWG_BASE}${endpoint}${filter}&key=${RAWG_API_KEY}&page_size=15`);
-                const data = await res.json();
-                setGames(data.results || []);
-            } catch(e) {}
-        };
-        fetchGames();
-    }, [endpoint, filter]);
-
-    if (games.length === 0) return null;
+        const observer = new IntersectionObserver(entries => { if (entries[0].isIntersecting) loadMoreLives(); }, { threshold: 0.1 });
+        if (loaderRef.current) observer.observe(loaderRef.current);
+        return () => observer.disconnect();
+    }, [loadMoreLives]);
 
     return (
-        <div className="px-4 md:px-12 relative group max-w-[1600px] mx-auto">
-            <div className="flex items-center justify-between mb-5 md:mb-8">
-                <h2 className="text-white/90 text-sm md:text-xl font-black uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-4">{title}</h2>
-                <div className="hidden md:flex gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={()=>scrollRef.current.scrollBy({ left: -400, behavior: 'smooth' })} className="w-10 h-10 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all text-white/50"><ChevronLeft className="w-5 h-5"/></button>
-                    <button onClick={()=>scrollRef.current.scrollBy({ left: 400, behavior: 'smooth' })} className="w-10 h-10 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all text-white/50"><ChevronRight className="w-5 h-5"/></button>
+        <div className="pt-28 md:pt-32 px-4 md:px-8 lg:px-12 pb-24 min-h-screen z-10 relative max-w-[1600px] mx-auto animate-in fade-in">
+            <PageHeader title="Twitch Hub" subtitle="Réseau mondial de diffusions (Protégé par cache)" icon={<><Tv className="w-6 h-6 md:w-8 md:h-8 text-red-500" /><span className="absolute top-4 right-4 w-3 h-3 bg-red-500 rounded-full animate-pulse border-2 border-[#060608]"></span></>} color="from-red-500/10 to-transparent" borderColor="border-red-500/30" />
+            
+            {(apiError || isRawgDead) && streams.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-20 bg-[#151520] rounded-3xl border border-white/5 mt-8">
+                    <AlertTriangle className="w-10 h-10 text-red-500 mb-4 opacity-50" />
+                    <span className="text-white/50 text-xs font-bold uppercase tracking-widest text-center">Aucun stream disponible.<br/>L'API RAWG est actuellement bloquée ou le quota est atteint.</span>
                 </div>
-            </div>
-            <div ref={scrollRef} className="flex overflow-x-auto gap-4 md:gap-6 no-scrollbar pb-6 row-container cursor-grab active:cursor-grabbing">
-                {games.map(game => (
-                    <div key={game.id} className="relative flex-none w-[160px] md:w-[260px]"><GameCard game={game} onClick={() => onGameClick(game)} /></div>
-                ))}
+            ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 md:gap-6">
+                    {streams.map((s, idx) => (
+                        <div key={idx} onClick={() => onPlay(s.gameObj, s)} className="bg-[#151520] border border-white/5 rounded-2xl overflow-hidden group cursor-pointer hover:border-red-500/50 transition-all shadow-xl flex flex-col h-full hover:-translate-y-1">
+                            <div className="relative aspect-video w-full bg-[#060608]">
+                                <img src={s.thumbnail} alt={s.name} className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity" loading="lazy" />
+                                <div className="absolute top-2 left-2 px-2 py-1 bg-red-600 text-white text-[9px] font-black uppercase tracking-widest rounded flex items-center gap-1.5 shadow-lg"><span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span> LIVE</div>
+                                <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/80 backdrop-blur text-white text-[9px] font-bold rounded flex items-center gap-1"><Users className="w-3 h-3 text-red-400" /> {s.view_count?.toLocaleString()}</div>
+                            </div>
+                            <div className="p-3 md:p-4 flex flex-col flex-1">
+                                <div className="text-[9px] text-red-400 font-black uppercase tracking-[0.15em] mb-1 truncate">{s.gameObj.name}</div>
+                                <h3 className="font-bold text-xs text-white/90 line-clamp-2 leading-snug">{s.name}</h3>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+            <div ref={loaderRef} className="w-full h-20 flex items-center justify-center mt-8">
+                {loading && <LoadingText color="text-red-500" borderColor="border-red-500" />}
             </div>
         </div>
     );
 }
 
-function DealsRow({ title, onDealClick }) {
-    const [deals, setDeals] = useState([]);
+// --- GRILLES LIGNE ---
+function GameRow({ title, endpoint, filter, onGameClick }) {
+    const [games, setGames] = useState([]);
+    const [isVisible, setIsVisible] = useState(false);
     const scrollRef = useDragToScroll();
+    const containerRef = useRef(null);
 
     useEffect(() => {
-        const fetchDeals = async () => {
-            try {
-                const res = await fetch(`${CHEAPSHARK_BASE}/deals?storeID=1&lowerPrice=2&upperPrice=15&pageSize=15&sortBy=Deal Rating`);
-                const data = await res.json();
-                setDeals(data || []);
-            } catch(e) {}
-        };
-        fetchDeals();
+        const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) setIsVisible(true); }, { rootMargin: '300px' });
+        if (containerRef.current) observer.observe(containerRef.current);
+        return () => observer.disconnect();
     }, []);
 
-    if (deals.length === 0) return null;
+    useEffect(() => {
+        if (!isVisible || isRawgDead) return;
+        fetchCached(`${RAWG_BASE}${endpoint}${filter}&key=${RAWG_API_KEY}&page_size=15`, `row_${endpoint}${filter}`).then(data => { if(data) setGames(data.results || []); });
+    }, [endpoint, filter, isVisible]);
+
+    // Si aucune donnée n'est récupérée, la ligne reste invisible sans casser la page
+    return (
+        <div ref={containerRef} className="px-4 md:px-8 lg:px-12 relative group max-w-[1600px] mx-auto min-h-[10px]">
+            {games.length > 0 && (
+                <>
+                <div className="flex items-center justify-between mb-4 md:mb-6">
+                    <h2 className="text-white/90 text-sm md:text-xl font-black uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-4">{title}</h2>
+                    <div className="hidden md:flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={()=>scrollRef.current.scrollBy({ left: -400, behavior: 'smooth' })} className="w-8 h-8 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 transition-all text-white/50"><ChevronLeft className="w-4 h-4"/></button>
+                        <button onClick={()=>scrollRef.current.scrollBy({ left: 400, behavior: 'smooth' })} className="w-8 h-8 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 transition-all text-white/50"><ChevronRight className="w-4 h-4"/></button>
+                    </div>
+                </div>
+                <div ref={scrollRef} className="flex overflow-x-auto gap-4 md:gap-5 no-scrollbar pb-6 row-container cursor-grab active:cursor-grabbing">
+                    {games.map(game => (
+                        <div key={game.id} className="relative flex-none w-[150px] sm:w-[180px] md:w-[220px] lg:w-[260px]"><GameCard game={game} onClick={() => onGameClick(game)} /></div>
+                    ))}
+                </div>
+                </>
+            )}
+        </div>
+    );
+}
+
+function DealsRow({ title, stores, onDealClick }) {
+    const [deals, setDeals] = useState([]);
+    const [isVisible, setIsVisible] = useState(false);
+    const scrollRef = useDragToScroll();
+    const containerRef = useRef(null);
+
+    useEffect(() => {
+        const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) setIsVisible(true); }, { rootMargin: '300px' });
+        if (containerRef.current) observer.observe(containerRef.current);
+        return () => observer.disconnect();
+    }, []);
+
+    useEffect(() => {
+        if (!isVisible) return;
+        fetchCached(`${CHEAPSHARK_BASE}/deals?storeID=1&lowerPrice=2&upperPrice=15&pageSize=15&sortBy=Deal Rating`, 'deals_row').then(data => { if(data) setDeals(data); });
+    }, [isVisible]);
 
     return (
-        <div className="px-4 md:px-12 relative group max-w-[1600px] mx-auto py-6 bg-gradient-to-r from-[#4ade80]/5 to-transparent border-y border-white/5">
-            <div className="flex items-center justify-between mb-5 md:mb-8">
-                <h2 className="text-white/90 text-sm md:text-xl font-black uppercase tracking-[0.2em] border-l-4 border-[#4ade80] pl-3 md:pl-4">{title}</h2>
-                <div className="hidden md:flex gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button onClick={()=>scrollRef.current.scrollBy({ left: -400, behavior: 'smooth' })} className="w-10 h-10 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all text-white/50"><ChevronLeft className="w-5 h-5"/></button>
-                    <button onClick={()=>scrollRef.current.scrollBy({ left: 400, behavior: 'smooth' })} className="w-10 h-10 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 hover:text-white transition-all text-white/50"><ChevronRight className="w-5 h-5"/></button>
-                </div>
-            </div>
-            <div ref={scrollRef} className="flex overflow-x-auto gap-4 md:gap-6 no-scrollbar pb-6 row-container cursor-grab active:cursor-grabbing">
-                {deals.map(deal => (
-                    <div key={deal.dealID} onClick={() => onDealClick(deal.title)} className="relative flex-none w-[220px] md:w-[300px] bg-[#151520] border border-white/5 rounded-2xl overflow-hidden hover:border-[#4ade80]/50 transition-all hover:shadow-[0_0_20px_rgba(74,222,128,0.15)] flex flex-col">
-                        <div className="relative h-[120px] md:h-[150px] bg-[#060608]">
-                            <img src={deal.thumb} alt={deal.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-                            <div className="absolute inset-0 bg-gradient-to-t from-[#151520] to-transparent"></div>
-                            <div className="absolute top-2 right-2 bg-[#4ade80] text-black font-black text-[10px] md:text-xs px-2 py-1 rounded shadow-lg uppercase tracking-widest">-{Math.round(deal.savings)}%</div>
-                        </div>
-                        <div className="p-4 flex flex-col flex-1">
-                            <h3 className="font-bold text-xs md:text-sm truncate text-white/90 mb-2">{deal.title}</h3>
-                            <div className="flex items-center gap-3 mt-auto">
-                                <span className="text-white font-black text-lg md:text-xl">${deal.salePrice}</span>
-                                <span className="text-white/30 text-[10px] md:text-xs font-bold line-through">${deal.normalPrice}</span>
-                            </div>
-                        </div>
+        <div ref={containerRef} className="px-4 md:px-8 lg:px-12 relative group max-w-[1600px] mx-auto py-6 md:bg-gradient-to-r from-[#4ade80]/5 to-transparent border-y border-white/5 min-h-[10px]">
+            {deals.length > 0 && (
+                <>
+                <div className="flex items-center justify-between mb-4 md:mb-6">
+                    <h2 className="text-white/90 text-sm md:text-xl font-black uppercase tracking-[0.2em] border-l-4 border-[#4ade80] pl-3 md:pl-4">{title}</h2>
+                    <div className="hidden md:flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={()=>scrollRef.current.scrollBy({ left: -400, behavior: 'smooth' })} className="w-8 h-8 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 transition-all text-white/50"><ChevronLeft className="w-4 h-4"/></button>
+                        <button onClick={()=>scrollRef.current.scrollBy({ left: 400, behavior: 'smooth' })} className="w-8 h-8 rounded-full bg-[#151520] border border-white/5 flex items-center justify-center hover:bg-white/10 transition-all text-white/50"><ChevronRight className="w-4 h-4"/></button>
                     </div>
-                ))}
-            </div>
+                </div>
+                <div ref={scrollRef} className="flex overflow-x-auto gap-4 md:gap-5 no-scrollbar pb-6 row-container cursor-grab active:cursor-grabbing">
+                    {deals.map(deal => {
+                        const storeInfo = stores && stores[deal.storeID];
+                        return (
+                            <div key={deal.dealID} onClick={() => onDealClick(deal.title)} className="relative flex-none w-[200px] sm:w-[240px] md:w-[280px] lg:w-[300px] bg-[#151520] border border-white/5 rounded-2xl overflow-hidden hover:border-[#4ade80]/50 transition-all hover:shadow-[0_0_20px_rgba(74,222,128,0.15)] flex flex-col">
+                                <div className="relative h-[100px] sm:h-[120px] md:h-[150px] bg-[#060608]">
+                                    <img src={deal.thumb} alt={deal.title} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
+                                    <div className="absolute inset-0 bg-gradient-to-t from-[#151520] to-transparent"></div>
+                                    <div className="absolute top-2 right-2 bg-[#4ade80] text-black font-black text-[9px] md:text-xs px-2 py-0.5 md:py-1 rounded shadow-lg uppercase tracking-widest">-{Math.round(deal.savings)}%</div>
+                                </div>
+                                <div className="p-3 md:p-4 flex flex-col flex-1">
+                                    {storeInfo && <div className="text-[8px] md:text-[9px] text-white/50 font-bold uppercase tracking-widest mb-1 truncate">{storeInfo.storeName}</div>}
+                                    <h3 className="font-bold text-[10px] md:text-xs lg:text-sm truncate text-white/90 mb-2">{deal.title}</h3>
+                                    <div className="flex items-center gap-2 md:gap-3 mt-auto">
+                                        <span className="text-white font-black text-base md:text-lg lg:text-xl">${deal.salePrice}</span>
+                                        <span className="text-white/30 text-[9px] md:text-[10px] lg:text-xs font-bold line-through">${deal.normalPrice}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+                </>
+            )}
         </div>
     );
 }
 
 function GameCard({ game, onClick }) {
     return (
-        <div onClick={onClick} className="relative flex flex-col group cursor-pointer rounded-2xl overflow-hidden shadow-xl border border-white/5 bg-[#151520] hover:scale-105 transition-transform duration-300">
+        <div onClick={onClick} className="relative flex flex-col group cursor-pointer rounded-2xl overflow-hidden shadow-xl border border-white/5 bg-[#151520] hover:scale-105 transition-transform duration-300 h-full">
             <div className="relative aspect-video w-full bg-[#060608] overflow-hidden">
                 {game.background_image ? (
                     <img src={game.background_image} alt={game.name} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity duration-500" loading="lazy" />
                 ) : (
-                    <div className="w-full h-full flex items-center justify-center"><Gamepad2 className="w-10 h-10 text-white/10" /></div>
+                    <div className="w-full h-full flex items-center justify-center"><Gamepad2 className="w-8 h-8 md:w-10 md:h-10 text-white/10" /></div>
                 )}
                 <div className="absolute inset-0 bg-gradient-to-t from-[#151520] via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-                
-                {game.metacritic && (
-                    <div className="absolute top-2 right-2 px-1.5 py-0.5 md:px-2 md:py-1 bg-[#060608]/80 backdrop-blur border border-white/10 rounded text-[8px] md:text-[9px] font-black text-[#00ffcc] uppercase tracking-widest shadow-lg">M {game.metacritic}</div>
-                )}
+                {game.metacritic && <div className="absolute top-2 right-2 px-1.5 py-0.5 bg-[#060608]/80 backdrop-blur border border-white/10 rounded text-[8px] md:text-[9px] font-black text-[#00ffcc] uppercase tracking-widest shadow-lg">M {game.metacritic}</div>}
             </div>
-            <div className="p-3 md:p-4 flex flex-col h-full bg-[#151520]">
-                <h3 className="font-bold text-xs md:text-sm leading-snug truncate text-white/90 group-hover:text-white transition-colors mb-2">{game.name}</h3>
-                <div className="flex items-center gap-2 text-[8px] md:text-[9px] text-white/40 uppercase font-bold tracking-[0.15em] mt-auto">
-                    <span>{game.released?.substring(0,4)}</span>
+            <div className="p-3 md:p-4 flex flex-col flex-1 bg-[#151520]">
+                <h3 className="font-bold text-[10px] md:text-xs lg:text-sm leading-snug line-clamp-2 text-white/90 group-hover:text-white transition-colors mb-2">{game.name}</h3>
+                <div className="flex items-center gap-1.5 md:gap-2 text-[7px] md:text-[8px] lg:text-[9px] text-white/40 uppercase font-bold tracking-[0.15em] mt-auto">
+                    <span className="truncate">{formatDateExact(game.released)}</span>
                     {game.genres && game.genres.length > 0 && (<><span>•</span><span className="truncate">{game.genres[0].name}</span></>)}
                 </div>
             </div>
@@ -839,29 +1212,25 @@ function GameCard({ game, onClick }) {
     );
 }
 
-// --- LE HUB DU JEU ---
-function GameDetailHub({ gameId, initialGame, initialStream, onClose, user, db, APP_ID, watchlist, setWatchlist, showToast }) {
+// --- HUB DU JEU ---
+function GameDetailHub({ gameId, initialGame, initialStream, onClose, user, db, APP_ID, watchlist, setWatchlist, showToast, stores, twitchConnected }) {
     const [game, setGame] = useState(initialGame);
     const [loading, setLoading] = useState(true);
     const [twitchData, setTwitchData] = useState([]);
-    
-    // Si on arrive depuis la page des Lives, on ouvre directement le modal Twitch !
     const [activeModal, setActiveModal] = useState(initialStream ? 'twitch' : null);
 
     useEffect(() => {
         const fetchGameDetails = async () => {
-            try {
-                const res = await fetch(`${RAWG_BASE}/games/${gameId}?key=${RAWG_API_KEY}`);
-                const data = await res.json();
-                setGame(data);
-                
-                // Fetch Twitch Streams for this game
-                const tRes = await fetch(`${RAWG_BASE}/games/${gameId}/twitch?key=${RAWG_API_KEY}`);
-                const tData = await tRes.json();
-                setTwitchData(tData.results || []);
+            const data = await fetchCached(`${RAWG_BASE}/games/${gameId}?key=${RAWG_API_KEY}`, `game_detail_${gameId}`);
+            if(data) setGame(data);
+            
+            // Twitch request (5 min cache)
+            if (!isRawgDead) {
+                const tData = await fetchCached(`${RAWG_BASE}/games/${gameId}/twitch?key=${RAWG_API_KEY}`, `game_twitch_${gameId}`, 300000);
+                setTwitchData(tData?.results?.filter(s => s.external_id) || []); // Seulement les valides
+            }
 
-                setLoading(false);
-            } catch(e) { setLoading(false); }
+            setLoading(false);
         };
         fetchGameDetails();
         document.body.style.overflow = 'hidden';
@@ -879,19 +1248,16 @@ function GameDetailHub({ gameId, initialGame, initialStream, onClose, user, db, 
     };
 
     if (activeModal === 'trailer') return <TrailerModal game={game} onClose={() => setActiveModal(null)} />;
-    // On passe l'initialStream à TwitchModal pour garantir qu'on regarde bien le live qu'on a cliqué
-    if (activeModal === 'twitch') return <TwitchModal game={game} twitchStreams={twitchData} initialStream={initialStream} onClose={() => setActiveModal(null)} />;
-    if (activeModal === 'deals') return <DealsModal gameName={game.name} onClose={() => setActiveModal(null)} />;
+    if (activeModal === 'twitch') return <TwitchModal game={game} twitchStreams={twitchData} initialStream={initialStream} twitchConnected={twitchConnected} onClose={() => setActiveModal(null)} />;
+    if (activeModal === 'deals') return <DealsModal gameName={game.name} stores={stores} onClose={() => setActiveModal(null)} />;
 
-    // LE HUB PRINCIPAL
     return (
         <div className="fixed inset-0 z-[9000] bg-[#060608] overflow-y-auto no-scrollbar animate-in fade-in duration-300">
             <button onClick={onClose} className="fixed top-4 right-4 md:top-6 md:right-6 z-[9999] p-2 md:p-3 bg-black/40 hover:bg-[#a855f7] rounded-full text-white/70 hover:text-white backdrop-blur border border-white/10 transition-all outline-none shadow-lg">
                 <X className="w-5 h-5 md:w-6 md:h-6" />
             </button>
 
-            {/* HERO BANNER DU HUB */}
-            <div className="relative w-full h-[40vh] md:h-[60vh] bg-[#060608]">
+            <div className="relative w-full h-[35vh] md:h-[50vh] bg-[#060608]">
                 <div className="absolute inset-0 z-0">
                     <img src={game.background_image} alt="" className="w-full h-full object-cover opacity-30" />
                     <div className="absolute inset-0 bg-gradient-to-t from-[#060608] via-[#060608]/80 to-transparent"></div>
@@ -899,81 +1265,72 @@ function GameDetailHub({ gameId, initialGame, initialStream, onClose, user, db, 
                 </div>
             </div>
 
-            {/* CONTENU HUB REMONTANT */}
-            <div className="relative z-20 max-w-7xl mx-auto px-4 md:px-12 -mt-32 md:-mt-48 pb-24">
-                <div className="flex flex-col md:flex-row gap-8 md:gap-12 items-start mb-12">
-                    <div className="hidden md:block w-56 shrink-0 rounded-3xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.5)] border border-white/10 bg-[#151520] aspect-[2/3] relative">
+            <div className="relative z-20 max-w-7xl mx-auto px-4 md:px-8 lg:px-12 -mt-24 md:-mt-32 pb-24">
+                <div className="flex flex-col md:flex-row gap-6 md:gap-12 items-start mb-8 md:mb-12">
+                    <div className="hidden md:block w-48 lg:w-56 shrink-0 rounded-3xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.5)] border border-white/10 bg-[#151520] aspect-[2/3] relative">
                         <img src={game.background_image} alt="" className="w-full h-full object-cover opacity-90" />
                         <div className="absolute inset-0 ring-1 ring-inset ring-white/10 rounded-3xl"></div>
                     </div>
                     
                     <div className="flex-1 mt-auto w-full">
-                        <h1 className="text-4xl md:text-7xl font-black uppercase tracking-tight text-white drop-shadow-2xl mb-4 md:mb-6 leading-none">{game.name}</h1>
+                        <h1 className="text-3xl sm:text-4xl md:text-6xl lg:text-7xl font-black uppercase tracking-tight text-white drop-shadow-2xl mb-4 md:mb-6 leading-none">{game.name}</h1>
                         
-                        <div className="flex flex-wrap items-center gap-3 md:gap-4 text-[10px] md:text-xs font-bold uppercase tracking-widest text-white/50 mb-6 md:mb-8">
-                            <span className="bg-[#151520] px-3 py-1.5 md:px-4 md:py-2 rounded-lg border border-white/5 shadow-inner">{game.released?.substring(0,4)}</span>
-                            <span className="bg-[#151520] px-3 py-1.5 md:px-4 md:py-2 rounded-lg border border-white/5 shadow-inner">{game.playtime ? `${game.playtime}H Moyen` : 'Durée N/A'}</span>
-                            {game.metacritic && <span className="text-[#00ffcc] bg-[#00ffcc]/10 px-3 py-1.5 md:px-4 md:py-2 rounded-lg border border-[#00ffcc]/20 shadow-[0_0_15px_rgba(0,255,204,0.1)]">Metascore {game.metacritic}</span>}
+                        <div className="flex flex-wrap items-center gap-2 md:gap-4 text-[9px] md:text-xs font-bold uppercase tracking-widest text-white/50 mb-6">
+                            <span className="bg-[#151520] px-3 py-1.5 rounded-lg border border-white/5 shadow-inner">{game.released?.substring(0,4)}</span>
+                            <span className="bg-[#151520] px-3 py-1.5 rounded-lg border border-white/5 shadow-inner">{game.playtime ? `${game.playtime}H Moyen` : 'Durée N/A'}</span>
+                            {game.metacritic && <span className="text-[#00ffcc] bg-[#00ffcc]/10 px-3 py-1.5 rounded-lg border border-[#00ffcc]/20">Metascore {game.metacritic}</span>}
                         </div>
 
                         <div className="flex gap-4">
-                            <button onClick={toggleWatchlist} className={`px-6 py-4 md:px-8 md:py-4 rounded-xl text-xs font-black uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 outline-none ${inWatchlist ? 'bg-[#151520] border border-white/10 text-white hover:bg-white/5' : 'bg-white text-black hover:bg-[#a855f7] hover:text-white shadow-[0_0_30px_rgba(255,255,255,0.15)] active:scale-95'}`}>
+                            <button onClick={toggleWatchlist} className={`px-5 py-3 md:px-8 md:py-4 rounded-xl text-[10px] md:text-xs font-black uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-2 md:gap-3 outline-none ${inWatchlist ? 'bg-[#151520] border border-white/10 text-white hover:bg-white/5' : 'bg-white text-black hover:bg-[#a855f7] hover:text-white shadow-[0_0_30px_rgba(255,255,255,0.15)] active:scale-95'}`}>
                                 {inWatchlist ? <><CheckCircle className="w-4 h-4" /> Dans le Radar</> : <><Plus className="w-4 h-4" /> Ajouter au Radar</>}
                             </button>
                         </div>
                     </div>
                 </div>
 
-                {loading ? (
-                    <div className="flex justify-center py-20"><Zap className="w-10 h-10 text-[#a855f7] animate-pulse" /></div>
-                ) : (
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 md:gap-12">
-                        {/* Colonne de Gauche : Le Briefing */}
-                        <div className="lg:col-span-2 space-y-8">
+                {loading ? <LoadingText /> : (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 md:gap-12">
+                        <div className="lg:col-span-2 space-y-6 md:space-y-8">
                             <div>
-                                <h3 className="text-white/90 text-sm md:text-xl font-black mb-6 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-4">Archive & Briefing</h3>
-                                <div className="markdown text-xs md:text-base text-justify" dangerouslySetInnerHTML={{ __html: game.description || game.description_raw || "Aucune donnée trouvée." }} />
+                                <h3 className="text-white/90 text-xs md:text-lg lg:text-xl font-black mb-4 md:mb-6 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3">Archive & Briefing</h3>
+                                <div className="markdown text-[10px] sm:text-xs md:text-sm lg:text-base text-justify" dangerouslySetInnerHTML={{ __html: game.description || game.description_raw || "Aucune donnée trouvée." }} />
                             </div>
 
                             <div className="grid grid-cols-2 gap-4">
-                                <div className="bg-[#151520] p-6 rounded-2xl border border-white/5">
-                                    <span className="text-white/30 font-bold block mb-2 uppercase tracking-[0.2em] text-[10px] flex items-center gap-2"><Info className="w-4 h-4 text-[#a855f7]" /> Développeur</span>
-                                    <span className="text-white/90 font-bold text-sm block">{game.developers?.[0]?.name || 'Inconnu'}</span>
+                                <div className="bg-[#151520] p-4 md:p-6 rounded-2xl border border-white/5">
+                                    <span className="text-white/30 font-bold block mb-1 md:mb-2 uppercase tracking-[0.2em] text-[8px] md:text-[10px] flex items-center gap-2"><Info className="w-3 h-3 md:w-4 md:h-4 text-[#a855f7]" /> Développeur</span>
+                                    <span className="text-white/90 font-bold text-xs md:text-sm block">{game.developers?.[0]?.name || 'Inconnu'}</span>
                                 </div>
-                                <div className="bg-[#151520] p-6 rounded-2xl border border-white/5">
-                                    <span className="text-white/30 font-bold block mb-2 uppercase tracking-[0.2em] text-[10px] flex items-center gap-2"><Users className="w-4 h-4 text-[#a855f7]" /> Éditeur</span>
-                                    <span className="text-white/90 font-bold text-sm block">{game.publishers?.[0]?.name || 'Inconnu'}</span>
+                                <div className="bg-[#151520] p-4 md:p-6 rounded-2xl border border-white/5">
+                                    <span className="text-white/30 font-bold block mb-1 md:mb-2 uppercase tracking-[0.2em] text-[8px] md:text-[10px] flex items-center gap-2"><Users className="w-3 h-3 md:w-4 md:h-4 text-[#a855f7]" /> Éditeur</span>
+                                    <span className="text-white/90 font-bold text-xs md:text-sm block">{game.publishers?.[0]?.name || 'Inconnu'}</span>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Colonne de Droite : Boutons d'Action */}
                         <div className="space-y-4">
-                            <h3 className="text-white/90 text-sm md:text-xl font-black mb-6 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3 md:pl-4">Systèmes Intégrés</h3>
+                            <h3 className="text-white/90 text-xs md:text-lg lg:text-xl font-black mb-4 md:mb-6 uppercase tracking-[0.2em] border-l-4 border-[#a855f7] pl-3">Systèmes Intégrés</h3>
                             
-                            <button onClick={() => setActiveModal('trailer')} className="w-full bg-[#151520] hover:bg-white/5 border border-white/10 hover:border-white/30 p-6 md:p-8 rounded-3xl flex flex-col items-center justify-center gap-4 transition-all group outline-none shadow-xl hover:shadow-2xl hover:-translate-y-1">
-                                <div className="w-16 h-16 rounded-full bg-white/5 border border-white/10 flex items-center justify-center group-hover:bg-white group-hover:text-black transition-colors">
-                                    <Play className="w-6 h-6 fill-current" />
-                                </div>
-                                <span className="font-black uppercase tracking-[0.2em] text-sm group-hover:text-white text-white/70">Bande Annonce</span>
+                            <button onClick={() => setActiveModal('trailer')} className="w-full bg-[#151520] hover:bg-white/5 border border-white/10 hover:border-white/30 p-5 md:p-8 rounded-2xl md:rounded-3xl flex flex-col items-center justify-center gap-3 transition-all group outline-none shadow-lg hover:-translate-y-1">
+                                <div className="w-12 h-12 md:w-16 md:h-16 rounded-full bg-white/5 border border-white/10 flex items-center justify-center group-hover:bg-white group-hover:text-black transition-colors"><Play className="w-5 h-5 md:w-6 md:h-6 fill-current" /></div>
+                                <span className="font-black uppercase tracking-[0.2em] text-[10px] md:text-sm group-hover:text-white text-white/70">Bande Annonce</span>
                             </button>
 
-                            <button onClick={() => setActiveModal('twitch')} className="w-full bg-[#151520] hover:bg-red-500/10 border border-white/10 hover:border-red-500/30 p-6 md:p-8 rounded-3xl flex flex-col items-center justify-center gap-4 transition-all group outline-none shadow-xl hover:shadow-[0_10px_30px_rgba(239,68,68,0.15)] hover:-translate-y-1 relative overflow-hidden">
-                                {twitchData.length > 0 && <span className="absolute top-4 right-4 flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span></span>}
-                                <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center group-hover:bg-red-500 group-hover:text-white transition-colors text-red-500">
-                                    <Tv className="w-6 h-6" />
-                                </div>
-                                <span className="font-black uppercase tracking-[0.2em] text-sm group-hover:text-red-400 text-white/70 flex flex-col items-center gap-1">
-                                    Live Twitch
-                                    {twitchData.length > 0 && <span className="text-[9px] text-white/40 group-hover:text-red-300">Sessions Actives</span>}
-                                </span>
-                            </button>
+                            {/* CONDITION : Afficher Twitch SEULEMENT s'il y a un stream */}
+                            {twitchData.length > 0 && (
+                                <button onClick={() => setActiveModal('twitch')} className="w-full bg-[#151520] hover:bg-red-500/10 border border-white/10 hover:border-red-500/30 p-5 md:p-8 rounded-2xl md:rounded-3xl flex flex-col items-center justify-center gap-3 transition-all group outline-none shadow-lg hover:shadow-[0_10px_30px_rgba(239,68,68,0.15)] hover:-translate-y-1 relative overflow-hidden">
+                                    <span className="absolute top-4 right-4 flex h-2 w-2 md:h-3 md:w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 md:h-3 md:w-3 bg-red-500"></span></span>
+                                    <div className="w-12 h-12 md:w-16 md:h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center group-hover:bg-red-500 group-hover:text-white transition-colors text-red-500"><Tv className="w-5 h-5 md:w-6 md:h-6" /></div>
+                                    <span className="font-black uppercase tracking-[0.2em] text-[10px] md:text-sm group-hover:text-red-400 text-white/70 flex flex-col items-center gap-1">
+                                        Live Twitch <span className="text-[8px] md:text-[9px] text-white/40 group-hover:text-red-300">Sessions Actives</span>
+                                    </span>
+                                </button>
+                            )}
 
-                            <button onClick={() => setActiveModal('deals')} className="w-full bg-[#151520] hover:bg-[#4ade80]/10 border border-white/10 hover:border-[#4ade80]/30 p-6 md:p-8 rounded-3xl flex flex-col items-center justify-center gap-4 transition-all group outline-none shadow-xl hover:shadow-[0_10px_30px_rgba(74,222,128,0.15)] hover:-translate-y-1">
-                                <div className="w-16 h-16 rounded-full bg-[#4ade80]/10 border border-[#4ade80]/20 flex items-center justify-center group-hover:bg-[#4ade80] group-hover:text-black transition-colors text-[#4ade80]">
-                                    <ShoppingCart className="w-6 h-6" />
-                                </div>
-                                <span className="font-black uppercase tracking-[0.2em] text-sm group-hover:text-[#4ade80] text-white/70">Boutiques & Deals</span>
+                            <button onClick={() => setActiveModal('deals')} className="w-full bg-[#151520] hover:bg-[#4ade80]/10 border border-white/10 hover:border-[#4ade80]/30 p-5 md:p-8 rounded-2xl md:rounded-3xl flex flex-col items-center justify-center gap-3 transition-all group outline-none shadow-lg hover:shadow-[0_10px_30px_rgba(74,222,128,0.15)] hover:-translate-y-1">
+                                <div className="w-12 h-12 md:w-16 md:h-16 rounded-full bg-[#4ade80]/10 border border-[#4ade80]/20 flex items-center justify-center group-hover:bg-[#4ade80] group-hover:text-black transition-colors text-[#4ade80]"><ShoppingCart className="w-5 h-5 md:w-6 md:h-6" /></div>
+                                <span className="font-black uppercase tracking-[0.2em] text-[10px] md:text-sm group-hover:text-[#4ade80] text-white/70">Boutiques & Deals</span>
                             </button>
                         </div>
                     </div>
@@ -983,25 +1340,26 @@ function GameDetailHub({ gameId, initialGame, initialStream, onClose, user, db, 
     );
 }
 
-// ==========================================
-// SOUS-MODALS 
-// ==========================================
-
 function TrailerModal({ game, onClose }) {
     const [videoUrl, setVideoUrl] = useState(null);
+    const [videoType, setVideoType] = useState(null); // 'rawg', 'youtube_embed'
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         const fetchTrailer = async () => {
-            try {
-                const res = await fetch(`${RAWG_BASE}/games/${game.id}/movies?key=${RAWG_API_KEY}`);
-                const data = await res.json();
-                if (data.results && data.results.length > 0) {
-                    setVideoUrl(data.results[0].data.max || data.results[0].data['480']);
-                } else {
-                    setVideoUrl('youtube'); // Déclenche le iframe YouTube
-                }
-            } catch(e) { setVideoUrl('youtube'); }
+            // 1. Tenter RAWG (Fichiers MP4 directs, haute qualité mais incomplet)
+            const data = await fetchCached(`${RAWG_BASE}/games/${game.id}/movies?key=${RAWG_API_KEY}`, `trailer_${game.id}`);
+            if (data?.results?.length > 0) { 
+                setVideoUrl(data.results[0].data.max || data.results[0].data['480']); 
+                setVideoType('rawg');
+                setLoading(false);
+                return;
+            } 
+            
+            // 2. Plan B : YouTube Embed (Astuce d'intégration sans clé API !)
+            // Utilise l'URL de recherche playlist pour forcer YouTube à embed le 1er résultat de recherche
+            setVideoUrl(`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(game.name + " official game trailer")}&autoplay=1`);
+            setVideoType('youtube_embed');
             setLoading(false);
         };
         fetchTrailer();
@@ -1011,59 +1369,26 @@ function TrailerModal({ game, onClose }) {
         <div className="fixed inset-0 z-[9999] bg-[#060608]/95 backdrop-blur-xl flex items-center justify-center animate-in zoom-in-95 duration-300 p-4">
             <button onClick={onClose} className="absolute top-6 right-6 z-[10000] p-3 bg-white/10 hover:bg-white/20 rounded-full text-white backdrop-blur border border-white/20 transition-all outline-none shadow-2xl"><X className="w-6 h-6" /></button>
             <div className="w-full h-full max-h-[80vh] max-w-6xl mx-auto relative bg-[#060608] md:rounded-3xl overflow-hidden shadow-[0_0_80px_rgba(168,85,247,0.15)] md:border md:border-white/10 flex flex-col items-center justify-center">
-                {loading ? <Zap className="w-10 h-10 text-[#a855f7] animate-pulse" /> : 
-                 videoUrl === 'youtube' ? (
-                     // IFRAME YOUTUBE FIABLE (Recherche direct intégrée)
-                     <iframe 
-                        className="w-full h-full border-none bg-black" 
-                        src={`https://www.youtube.com/embed?listType=search&list=${encodeURIComponent(game.name + " official gameplay trailer")}`} 
-                        allow="autoplay; encrypted-media" 
-                        allowFullScreen>
-                     </iframe>
-                 ) : (
+                {loading ? <LoadingText /> : 
+                 videoType === 'rawg' ? (
                      <video src={videoUrl} controls autoPlay className="w-full h-full object-contain bg-black"></video>
+                 ) : (
+                     <iframe src={videoUrl} allow="autoplay; encrypted-media; fullscreen" allowFullScreen className="w-full h-full border-none bg-black"></iframe>
                  )}
             </div>
         </div>
     );
 }
 
-function TwitchModal({ game, twitchStreams, initialStream, onClose }) {
-    // Si on a un stream cliqué depuis la page Live, on l'utilise. 
-    // Sinon on prend le premier valide.
-    const validStreams = twitchStreams.filter(s => s.external_id);
-    const defaultStream = initialStream || (validStreams.length > 0 ? validStreams[0] : null);
+function TwitchModal({ game, twitchStreams, initialStream, twitchConnected, onClose }) {
+    const defaultStream = initialStream || (twitchStreams.length > 0 ? twitchStreams[0] : null);
     const [selectedStream, setSelectedStream] = useState(defaultStream);
     
     let currentDomain = window.location.hostname;
-    if (!currentDomain || currentDomain === "127.0.0.1") currentDomain = "localhost";
-    const parents = [currentDomain, "localhost", "levelup-ecosystem.com", "gaming.levelup-ecosystem.com"];
+    if (!currentDomain || currentDomain === "127.0.0.1" || currentDomain.includes("googleusercontent")) currentDomain = "localhost";
+    const parents = [currentDomain, "localhost", "levelup-ecosystem.com"];
     const parentParams = [...new Set(parents)].map(p => `parent=${p}`).join('&');
 
-    // SI VRAIMENT AUCUN STREAM N'EXISTE POUR CE JEU, ON AFFICHE UN MESSAGE PROPRE (Sans Iframe)
-    if (!selectedStream) {
-        return (
-            <div className="fixed inset-0 z-[9999] bg-[#060608] flex flex-col animate-in slide-in-from-bottom duration-300">
-                <div className="flex justify-between items-center p-4 bg-[#151520] border-b border-white/5 shrink-0 shadow-lg relative z-10">
-                    <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-red-500/10 flex items-center justify-center border border-red-500/20 text-red-500"><Tv className="w-5 h-5" /></div>
-                        <div>
-                            <h3 className="text-xs md:text-sm font-black text-white uppercase tracking-[0.2em]">Twitch Immersif</h3>
-                            <p className="text-[9px] md:text-[10px] text-white/40 uppercase tracking-widest">{game.name}</p>
-                        </div>
-                    </div>
-                    <button onClick={onClose} className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-all outline-none"><X className="w-5 h-5" /></button>
-                </div>
-                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#060608]">
-                    <Tv className="w-16 h-16 text-red-500 opacity-50 mb-6" />
-                    <h3 className="text-xl md:text-2xl font-black text-white uppercase tracking-widest mb-4">Aucun Stream Actif</h3>
-                    <p className="text-white/60 text-sm max-w-md">Aucune chaîne ne diffuse actuellement ce jeu sur Twitch.</p>
-                </div>
-            </div>
-        );
-    }
-
-    // SI LE STREAM EXISTE, ON AFFICHE LE VRAI LECTEUR !
     return (
         <div className="fixed inset-0 z-[9999] bg-[#060608] flex flex-col animate-in slide-in-from-bottom duration-300">
             <div className="flex justify-between items-center p-4 bg-[#151520] border-b border-white/5 shrink-0 shadow-lg relative z-10">
@@ -1074,26 +1399,27 @@ function TwitchModal({ game, twitchStreams, initialStream, onClose }) {
                         <p className="text-[9px] md:text-[10px] text-white/40 uppercase tracking-widest">{game.name}</p>
                     </div>
                 </div>
-                <button onClick={onClose} className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-all outline-none"><X className="w-5 h-5" /></button>
+                <div className="flex items-center gap-4">
+                    {twitchConnected && <span className="hidden md:flex text-[10px] font-bold uppercase tracking-widest text-[#a855f7] bg-[#a855f7]/10 px-3 py-1.5 rounded-lg border border-[#a855f7]/30"><CheckCircle className="w-3 h-3 mr-2" /> Connecté</span>}
+                    <button onClick={onClose} className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-all outline-none"><X className="w-5 h-5" /></button>
+                </div>
             </div>
 
             <div className="flex flex-col md:flex-row flex-1 overflow-hidden relative">
-                {/* LECTEUR PRINCIPAL */}
                 <div className="flex-1 bg-black relative">
                     <iframe src={`https://player.twitch.tv/?channel=${selectedStream.external_id}&${parentParams}&muted=false`} height="100%" width="100%" allowFullScreen className="absolute inset-0 w-full h-full border-none"></iframe>
                 </div>
 
-                {/* SIDEBAR : CHAT ET AUTRES STREAMS */}
                 <div className="w-full md:w-[350px] lg:w-[400px] h-[50vh] md:h-full bg-[#0e0e14] border-t md:border-t-0 md:border-l border-white/5 flex flex-col shrink-0">
-                    <div className="flex-1 min-h-[300px]">
+                    <div className="flex-1 min-h-[250px] md:min-h-[300px]">
                         <iframe src={`https://www.twitch.tv/embed/${selectedStream.external_id}/chat?${parentParams}&darkpopout`} height="100%" width="100%" className="border-none w-full h-full"></iframe>
                     </div>
                     
-                    {validStreams.length > 1 && (
+                    {twitchStreams.length > 1 && (
                         <div className="h-[200px] overflow-y-auto no-scrollbar border-t border-white/5 bg-[#151520] p-4">
                             <h4 className="text-[10px] font-black text-white/40 uppercase tracking-[0.2em] mb-4">Autres Sessions Actives</h4>
                             <div className="space-y-3">
-                                {validStreams.map((s, idx) => {
+                                {twitchStreams.map((s, idx) => {
                                     if (s.external_id === selectedStream.external_id) return null;
                                     return (
                                         <div key={idx} onClick={() => setSelectedStream(s)} className="flex gap-3 items-center group cursor-pointer p-2 rounded-xl hover:bg-white/5 transition-colors">
@@ -1117,74 +1443,68 @@ function TwitchModal({ game, twitchStreams, initialStream, onClose }) {
     );
 }
 
-function DealsModal({ gameName, onClose }) {
+function DealsModal({ gameName, stores, onClose }) {
     const [deals, setDeals] = useState([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         const fetchDeals = async () => {
-            try {
-                const res = await fetch(`${CHEAPSHARK_BASE}/games?title=${encodeURIComponent(gameName)}&limit=10`);
-                const data = await res.json();
-                if (data && data.length > 0) {
-                    const exactMatch = data[0]; 
-                    const dealsRes = await fetch(`${CHEAPSHARK_BASE}/games?id=${exactMatch.gameID}`);
-                    const dealsData = await dealsRes.json();
-                    setDeals(dealsData.deals || []);
-                } else {
-                    setDeals([]);
-                }
-                setLoading(false);
-            } catch(e) { setLoading(false); }
+            const data = await fetchCached(`${CHEAPSHARK_BASE}/games?title=${encodeURIComponent(gameName)}&limit=10`, `deals_search_${gameName}`, 3600000); // 1h cache
+            if (data && data.length > 0) {
+                const dealsData = await fetchCached(`${CHEAPSHARK_BASE}/games?id=${data[0].gameID}`, `deals_game_${data[0].gameID}`, 3600000);
+                setDeals(dealsData?.deals || []);
+            } else setDeals([]);
+            setLoading(false);
         };
         fetchDeals();
     }, [gameName]);
 
     return (
         <div className="fixed inset-0 z-[9999] bg-[#060608] flex flex-col animate-in slide-in-from-bottom duration-300 overflow-y-auto">
-            <div className="flex justify-between items-center p-6 bg-[#151520] border-b border-white/5 sticky top-0 z-50">
+            <div className="flex justify-between items-center p-6 bg-[#151520] border-b border-white/5 sticky top-0 z-50 shadow-lg">
                 <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-[#4ade80]/10 flex items-center justify-center border border-[#4ade80]/20 text-[#4ade80]"><ShoppingCart className="w-6 h-6" /></div>
+                    <div className="w-10 h-10 md:w-12 md:h-12 rounded-xl md:rounded-2xl bg-[#4ade80]/10 flex items-center justify-center border border-[#4ade80]/20 text-[#4ade80]"><ShoppingCart className="w-5 h-5 md:w-6 md:h-6" /></div>
                     <div>
-                        <h3 className="text-sm md:text-xl font-black text-white uppercase tracking-[0.2em]">Radar de Boutiques</h3>
-                        <p className="text-[10px] md:text-xs text-white/40 uppercase tracking-widest">{gameName}</p>
+                        <h3 className="text-xs md:text-sm lg:text-xl font-black text-white uppercase tracking-[0.2em]">Radar de Boutiques Légales</h3>
+                        <p className="text-[9px] md:text-[10px] lg:text-xs text-white/40 uppercase tracking-widest">{gameName}</p>
                     </div>
                 </div>
-                <button onClick={onClose} className="p-3 bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-all outline-none"><X className="w-6 h-6" /></button>
+                <button onClick={onClose} className="p-2 md:p-3 bg-white/5 hover:bg-white/10 rounded-full text-white/70 hover:text-white transition-all outline-none"><X className="w-5 h-5 md:w-6 md:h-6" /></button>
             </div>
             
-            <div className="p-6 md:p-12 max-w-7xl mx-auto w-full">
-                {loading ? (
-                    <div className="flex justify-center py-20"><Zap className="w-8 h-8 md:w-10 md:h-10 text-[#4ade80] animate-pulse" /></div>
-                ) : deals.length === 0 ? (
+            <div className="p-4 md:p-8 lg:p-12 max-w-7xl mx-auto w-full">
+                {loading ? <LoadingText color="text-[#4ade80]" borderColor="border-[#4ade80]" /> : deals.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-16 md:py-24 text-white/20 bg-[#151520] rounded-3xl border border-white/5">
                         <MonitorPlay className="w-12 h-12 md:w-16 md:h-16 mb-4 md:mb-6 opacity-20" />
-                        <span className="text-[10px] md:text-xs font-bold uppercase tracking-[0.2em] text-center max-w-xs">Aucune faille tarifaire trouvée.</span>
+                        <span className="text-[10px] md:text-xs font-bold uppercase tracking-[0.2em] text-center max-w-xs">Aucune offre légale trouvée.</span>
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-                        {deals.map((deal, idx) => (
-                            <div key={idx} className="flex flex-col sm:flex-row sm:items-center justify-between bg-[#151520] p-4 md:p-6 rounded-2xl border border-white/5 hover:border-[#4ade80]/50 hover:bg-[#1a1a24] transition-all group shadow-xl">
-                                <div className="flex flex-col mb-4 sm:mb-0">
-                                    <span className="text-[8px] md:text-[9px] text-white/30 uppercase font-bold tracking-[0.2em] mb-2 flex items-center gap-2"><ShoppingCart className="w-3 h-3 text-[#4ade80]" /> Store ID {deal.storeID}</span>
-                                    <div className="flex items-center gap-3 md:gap-4">
-                                        <span className="text-2xl md:text-3xl font-black text-white">${deal.price}</span>
-                                        {deal.retailPrice > deal.price && (
-                                            <div className="flex flex-col">
-                                                <span className="text-[10px] md:text-xs text-white/40 font-bold line-through">${deal.retailPrice}</span>
-                                                <span className="text-[8px] md:text-[9px] font-black text-[#4ade80] uppercase tracking-widest mt-0.5 bg-[#4ade80]/10 px-2 py-0.5 rounded w-fit">Éco {Math.round(deal.savings)}%</span>
-                                            </div>
-                                        )}
+                        {deals.map((deal, idx) => {
+                            const storeInfo = stores && stores[deal.storeID];
+                            return (
+                                <div key={idx} className="flex flex-col sm:flex-row sm:items-center justify-between bg-[#151520] p-4 md:p-6 rounded-2xl border border-white/5 hover:border-[#4ade80]/50 hover:bg-[#1a1a24] transition-all group shadow-xl">
+                                    <div className="flex flex-col mb-4 sm:mb-0">
+                                        <div className="flex items-center gap-3 mb-3">
+                                            {storeInfo && storeInfo.images?.icon && <img src={`https://www.cheapshark.com${storeInfo.images.icon}`} alt={storeInfo.storeName} className="w-4 h-4 md:w-5 md:h-5 rounded" />}
+                                            <span className="text-[9px] md:text-[10px] lg:text-xs text-white/70 uppercase font-black tracking-[0.2em]">{storeInfo ? storeInfo.storeName : `Boutique ${deal.storeID}`}</span>
+                                        </div>
+                                        <div className="flex items-center gap-3 md:gap-4">
+                                            <span className="text-xl md:text-2xl lg:text-3xl font-black text-white">${deal.price}</span>
+                                            {deal.retailPrice > deal.price && (
+                                                <div className="flex flex-col">
+                                                    <span className="text-[9px] md:text-[10px] lg:text-xs text-white/40 font-bold line-through">${deal.retailPrice}</span>
+                                                    <span className="text-[8px] md:text-[9px] font-black text-[#4ade80] uppercase tracking-widest mt-0.5 bg-[#4ade80]/10 px-2 py-0.5 rounded w-fit">Éco {Math.round(deal.savings)}%</span>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
+                                    <a href={`https://www.cheapshark.com/redirect?dealID=${deal.dealID}`} target="_blank" rel="noreferrer" className="px-4 py-3 md:px-6 md:py-4 bg-[#4ade80]/10 border border-[#4ade80]/30 text-[#4ade80] rounded-xl text-[10px] md:text-xs font-black uppercase tracking-[0.2em] hover:bg-[#4ade80] hover:text-black transition-all flex items-center justify-center gap-2 outline-none group-hover:shadow-[0_0_20px_rgba(74,222,128,0.4)] active:scale-95">
+                                        Lien d'achat <ChevronRight className="w-3 h-3 md:w-4 md:h-4" />
+                                    </a>
                                 </div>
-                                <a 
-                                    href={`https://www.cheapshark.com/redirect?dealID=${deal.dealID}`} target="_blank" rel="noreferrer"
-                                    className="px-4 py-3 md:px-6 md:py-4 bg-white text-black rounded-xl text-[10px] md:text-xs font-black uppercase tracking-[0.2em] hover:bg-[#4ade80] transition-all flex items-center justify-center gap-2 outline-none group-hover:shadow-[0_0_20px_rgba(74,222,128,0.4)] active:scale-95"
-                                >
-                                    Voir <ChevronRight className="w-3 h-3 md:w-4 md:h-4" />
-                                </a>
-                            </div>
-                        ))}
+                            )
+                        })}
                     </div>
                 )}
             </div>
